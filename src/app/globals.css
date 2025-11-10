@@ -1,0 +1,173 @@
+@import "tailwindcss";
+
+/* Root-level design tokens and Tailwind theme overrides for the visualiser. */
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Exchange (circular) markers and supporting hover styles. */
+/* .exchange-marker { */
+.exchange-marker {
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: var(--marker-color, #22d3ee);
+  border: 2px solid rgba(255, 255, 255, 0.75);
+  box-shadow: 0 0 12px rgba(15, 118, 110, 0.55),
+    0 0 28px rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+  transform: translateY(-6px);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.exchange-marker::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 2px;
+  height: 12px;
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.7),
+    rgba(255, 255, 255, 0)
+  );
+  transform: translateX(-50%);
+}
+
+.exchange-marker:hover {
+  transform: translateY(-8px) scale(1.05);
+  box-shadow: 0 0 16px rgba(34, 211, 238, 0.7),
+    0 0 32px rgba(255, 255, 255, 0.45);
+}
+
+.marker-popup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-family: var(--font-geist-sans, "Inter", sans-serif);
+}
+
+.marker-popup h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.marker-popup p {
+  margin: 0;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #475569;
+}
+
+.marker-popup .badge {
+  display: inline-flex;
+  margin-top: 0.25rem;
+  align-self: flex-start;
+  border-radius: 999px;
+  background: #0f172a;
+  color: white;
+  font-size: 0.65rem;
+  font-weight: 500;
+  padding: 0.125rem 0.5rem;
+  letter-spacing: 0.08em;
+}
+
+/* Diamond-style markers used for cloud regions. */
+.cloud-region-marker {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: var(--marker-color, #38bdf8);
+  border: 2px solid rgba(14, 116, 144, 0.75);
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.45),
+    0 0 22px rgba(14, 165, 233, 0.35);
+  transform: translate(-50%, -50%);
+}
+
+.cloud-region-marker::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+/* Shared popup styles for both markers and latency lines. */
+.latency-popup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 180px;
+  font-family: var(--font-geist-sans, "Inter", sans-serif);
+}
+
+.latency-popup h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.latency-popup p {
+  margin: 0;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #475569;
+}
+
+.latency-chip {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #f8fafc;
+  text-transform: uppercase;
+}
+
+.latency-low {
+  background: #16a34a;
+}
+
+.latency-medium {
+  background: #ca8a04;
+}
+
+.latency-high {
+  background: #dc2626;
+}
+
+.latency-unknown {
+  background: rgba(148, 163, 184, 0.65);
+}
