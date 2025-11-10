@@ -20,8 +20,6 @@ import {
   CLOUD_REGIONS,
   EXCHANGE_LOCATIONS,
   type CloudProvider,
-  type CloudRegion,
-  type ExchangeLocation,
 } from '@/data/network';
 import LatencyHistoryPanel from '@/components/LatencyHistoryPanel';
 import type {
