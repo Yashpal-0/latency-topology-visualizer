@@ -59,6 +59,40 @@ type RegionMarkerEntry = {
   element: HTMLDivElement;
 };
 
+type LatencyVisibilityMap = Record<LatencyStatus, boolean>;
+
+type LayerVisibilityState = {
+  realtime: boolean;
+  history: boolean;
+  regions: boolean;
+};
+
+type SearchResult = {
+  id: string;
+  label: string;
+  type: 'exchange' | 'region';
+  provider: CloudProvider;
+  coordinates: [number, number];
+  meta: string;
+  disabled?: boolean;
+};
+
+type PerformanceMetrics = {
+  sampleCount: number;
+  averageLatency: number | null;
+  maxLatency: number | null;
+  minLatency: number | null;
+  visibleRegionCount: number;
+  status: 'Operational' | 'Degraded' | 'Paused';
+};
+
+type FeatureCollectionConfig = {
+  providerVisibility?: ProviderVisibilityMap;
+  exchangeFilter?: string;
+  allowedStatuses?: LatencyVisibilityMap;
+  realtimeEnabled?: boolean;
+};
+
 const LATENCY_COLORS: Record<LatencyStatus, string> = {
   low: '#22c55e',
   medium: '#facc15',
@@ -84,6 +118,21 @@ const REGION_BOUNDARY_OUTLINE_LAYER_ID = 'region-boundary-outline';
 const REGION_BOUNDARY_RADIUS_KM = 600;
 const REGION_BOUNDARY_SEGMENTS = 64;
 const EARTH_RADIUS_KM = 6371;
+
+const EXCHANGE_DISPLAY_ALL = 'all';
+
+const LAYER_VISIBILITY_DEFAULT: LayerVisibilityState = {
+  realtime: true,
+  history: true,
+  regions: true,
+};
+
+const LATENCY_DEFAULT_VISIBILITY: LatencyVisibilityMap = {
+  low: true,
+  medium: true,
+  high: true,
+  unknown: true,
+};
 
 // Sequence of dash patterns used to animate latency lines.
 const dashArraySequence: [number, number, number][] = [
@@ -118,6 +167,13 @@ export default function ExchangeMap() {
       Azure: true,
     }
   );
+  const [layerVisibility, setLayerVisibility] =
+    useState<LayerVisibilityState>(LAYER_VISIBILITY_DEFAULT);
+  const [displayExchangeFilter, setDisplayExchangeFilter] =
+    useState<string>(EXCHANGE_DISPLAY_ALL);
+  const [latencyFilters, setLatencyFilters] =
+    useState<LatencyVisibilityMap>(LATENCY_DEFAULT_VISIBILITY);
+  const [searchQuery, setSearchQuery] = useState('');
   const [selectedExchange, setSelectedExchange] = useState<string>(
     DEFAULT_EXCHANGE_ID || EXCHANGE_LOCATIONS[0]?.id || ''
   );
@@ -133,6 +189,9 @@ export default function ExchangeMap() {
   const [historyQueriedAt, setHistoryQueriedAt] = useState<string | null>(null);
   const accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN;
   const visibleProvidersRef = useRef(visibleProviders);
+  const exchangeFilterRef = useRef(displayExchangeFilter);
+  const latencyFiltersRef = useRef(latencyFilters);
+  const layerVisibilityRef = useRef(layerVisibility);
 
   // Derive the freshest timestamp so the legend can display "Updated HH:MM:SS".
   const lastUpdated = useMemo(() => {
@@ -155,6 +214,18 @@ export default function ExchangeMap() {
   useEffect(() => {
     visibleProvidersRef.current = visibleProviders;
   }, [visibleProviders]);
+
+  useEffect(() => {
+    exchangeFilterRef.current = displayExchangeFilter;
+  }, [displayExchangeFilter]);
+
+  useEffect(() => {
+    latencyFiltersRef.current = latencyFilters;
+  }, [latencyFilters]);
+
+  useEffect(() => {
+    layerVisibilityRef.current = layerVisibility;
+  }, [layerVisibility]);
 
   useEffect(() => {
     const current = CLOUD_REGIONS.find((entry) => entry.id === selectedRegion);
@@ -180,6 +251,14 @@ export default function ExchangeMap() {
         label: `${exchange.name} • ${exchange.city}`,
       })),
     []
+  );
+
+  const exchangeFilterOptions = useMemo(
+    () => [
+      { id: EXCHANGE_DISPLAY_ALL, label: 'All Exchanges' },
+      ...exchangeOptions,
+    ],
+    [exchangeOptions]
   );
 
   const regionOptions = useMemo(
@@ -215,6 +294,139 @@ export default function ExchangeMap() {
     () =>
       CLOUD_REGIONS.find((region) => region.id === selectedRegion) ?? null,
     [selectedRegion]
+  );
+
+  const searchResults = useMemo<SearchResult[]>(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) {
+      return [];
+    }
+    const exchangeMatches: SearchResult[] = EXCHANGE_LOCATIONS.filter(
+      (exchange) =>
+        exchange.name.toLowerCase().includes(query) ||
+        exchange.city.toLowerCase().includes(query) ||
+        exchange.id.toLowerCase().includes(query)
+    ).map((exchange) => ({
+      id: exchange.id,
+      label: exchange.name,
+      type: 'exchange',
+      provider: exchange.provider,
+      coordinates: exchange.coordinates,
+      meta: `${exchange.city}, ${exchange.country}`,
+      disabled: false,
+    }));
+
+    const regionMatches: SearchResult[] = CLOUD_REGIONS.filter(
+      (region) =>
+        region.name.toLowerCase().includes(query) ||
+        region.city.toLowerCase().includes(query) ||
+        region.regionCode.toLowerCase().includes(query)
+    ).map((region) => ({
+      id: region.id,
+      label: region.name,
+      type: 'region',
+      provider: region.provider,
+      coordinates: region.coordinates,
+      meta: `${region.city}, ${region.country}`,
+      disabled: visibleProviders[region.provider] === false,
+    }));
+
+    return [...exchangeMatches, ...regionMatches].slice(0, 8);
+  }, [searchQuery, visibleProviders]);
+
+  const metrics = useMemo<PerformanceMetrics>(() => {
+    const snapshots = Object.values(latencySnapshots);
+    const activeSamples = snapshots
+      .map((entry) => entry.latencyIdle)
+      .filter((value): value is number => typeof value === 'number');
+    const averageLatency =
+      activeSamples.reduce((sum, value) => sum + value, 0) /
+      (activeSamples.length || 1);
+    const maxLatency = activeSamples.length
+      ? Math.max(...activeSamples)
+      : null;
+    const minLatency = activeSamples.length
+      ? Math.min(...activeSamples)
+      : null;
+    const visibleRegionCount = CLOUD_REGIONS.filter(
+      (region) => visibleProviders[region.provider]
+    ).length;
+    return {
+      sampleCount: snapshots.length,
+      averageLatency:
+        Number.isFinite(averageLatency) && activeSamples.length
+          ? averageLatency
+          : null,
+      maxLatency,
+      minLatency,
+      visibleRegionCount,
+      status: latencyError
+        ? 'Degraded'
+        : layerVisibility.realtime
+        ? 'Operational'
+        : 'Paused',
+    };
+  }, [latencySnapshots, latencyError, layerVisibility.realtime, visibleProviders]);
+
+  const handleSearchSelect = useCallback(
+    (result: SearchResult) => {
+      if (result.disabled) {
+        return;
+      }
+      setSearchQuery('');
+      if (result.type === 'exchange') {
+        setSelectedExchange(result.id);
+        setDisplayExchangeFilter(result.id);
+        const exchange = EXCHANGE_LOCATIONS.find(
+          (entry) => entry.id === result.id
+        );
+        if (exchange && mapRef.current) {
+          mapRef.current.flyTo({
+            center: exchange.coordinates,
+            zoom: 4.5,
+            pitch: 55,
+            bearing: mapRef.current.getBearing(),
+            duration: 1400,
+            essential: true,
+          });
+        }
+      } else {
+        setSelectedRegion(result.id);
+        const region = CLOUD_REGIONS.find((entry) => entry.id === result.id);
+        if (region && mapRef.current) {
+          mapRef.current.flyTo({
+            center: region.coordinates,
+            zoom: 4,
+            pitch: 50,
+            bearing: mapRef.current.getBearing(),
+            duration: 1400,
+            essential: true,
+          });
+        }
+      }
+    },
+    []
+  );
+
+  const toggleLatencyFilter = useCallback((status: LatencyStatus) => {
+    setLatencyFilters((prev) => {
+      const next = { ...prev, [status]: !prev[status] };
+      const hasActive = Object.values(next).some(Boolean);
+      if (!hasActive) {
+        return prev;
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleLayerVisibility = useCallback(
+    (layer: keyof LayerVisibilityState) => {
+      setLayerVisibility((prev) => ({
+        ...prev,
+        [layer]: !prev[layer],
+      }));
+    },
+    []
   );
 
   useEffect(() => {
@@ -390,7 +602,12 @@ export default function ExchangeMap() {
       // Latency source & layers
       map.addSource(CONNECTION_SOURCE_ID, {
         type: 'geojson',
-        data: toFeatureCollection({}, visibleProvidersRef.current),
+        data: toFeatureCollection({}, {
+          providerVisibility: visibleProvidersRef.current,
+          exchangeFilter: exchangeFilterRef.current,
+          allowedStatuses: latencyFiltersRef.current,
+          realtimeEnabled: layerVisibilityRef.current.realtime,
+        }),
       });
 
       map.addLayer({
@@ -708,7 +925,7 @@ export default function ExchangeMap() {
   }, [accessToken]);
 
   useEffect(() => {
-    // Whenever latency snapshots change, refresh the geojson source.
+    // Whenever latency snapshots or filters change, refresh the geojson source.
     if (!mapRef.current) {
       return;
     }
@@ -718,8 +935,21 @@ export default function ExchangeMap() {
     if (!source) {
       return;
     }
-    source.setData(toFeatureCollection(latencySnapshots, visibleProviders));
-  }, [latencySnapshots, visibleProviders]);
+    source.setData(
+      toFeatureCollection(latencySnapshots, {
+        providerVisibility: visibleProviders,
+        exchangeFilter: displayExchangeFilter,
+        allowedStatuses: latencyFilters,
+        realtimeEnabled: layerVisibility.realtime,
+      })
+    );
+  }, [
+    latencySnapshots,
+    visibleProviders,
+    displayExchangeFilter,
+    latencyFilters,
+    layerVisibility.realtime,
+  ]);
 
   useEffect(() => {
     // Poll Cloudflare Radar via our API every 10 seconds.
@@ -784,11 +1014,53 @@ export default function ExchangeMap() {
     }
 
     regionMarkersRef.current.forEach(({ element, region }) => {
-      element.style.display = visibleProviders[region.provider] ? '' : 'none';
+      const shouldShow =
+        layerVisibility.regions && visibleProviders[region.provider];
+      element.style.display = shouldShow ? '' : 'none';
     });
-  }, [visibleProviders]);
+  }, [visibleProviders, layerVisibility.regions]);
 
   useEffect(() => {
+    const map = mapRef.current;
+    if (!map) {
+      return;
+    }
+    const realtimeVisibility = layerVisibility.realtime ? 'visible' : 'none';
+    if (map.getLayer(CONNECTION_LAYER_ID)) {
+      map.setLayoutProperty(CONNECTION_LAYER_ID, 'visibility', realtimeVisibility);
+    }
+    if (map.getLayer(CONNECTION_LABEL_LAYER_ID)) {
+      map.setLayoutProperty(
+        CONNECTION_LABEL_LAYER_ID,
+        'visibility',
+        realtimeVisibility
+      );
+    }
+    const regionVisibility = layerVisibility.regions ? 'visible' : 'none';
+    if (map.getLayer(REGION_BOUNDARY_LAYER_ID)) {
+      map.setLayoutProperty(
+        REGION_BOUNDARY_LAYER_ID,
+        'visibility',
+        regionVisibility
+      );
+    }
+    if (map.getLayer(REGION_BOUNDARY_OUTLINE_LAYER_ID)) {
+      map.setLayoutProperty(
+        REGION_BOUNDARY_OUTLINE_LAYER_ID,
+        'visibility',
+        regionVisibility
+      );
+    }
+  }, [layerVisibility.realtime, layerVisibility.regions]);
+
+  useEffect(() => {
+    if (!layerVisibility.history) {
+      setHistoryPoints([]);
+      setHistoryStats(null);
+      setHistoryLoading(false);
+      setHistoryError(null);
+      return;
+    }
     if (!selectedRegion) {
       setHistoryPoints([]);
       setHistoryStats(null);
@@ -855,13 +1127,13 @@ export default function ExchangeMap() {
     return () => {
       controller.abort();
     };
-  }, [selectedExchange, selectedRegion, selectedRange]);
+  }, [selectedExchange, selectedRegion, selectedRange, layerVisibility.history]);
 
   return (
     <div className="relative flex h-[calc(100vh-0px)] w-full flex-col">
       <div ref={containerRef} className="relative h-full w-full" />
 
-      <aside className="pointer-events-none absolute top-6 left-6 flex max-w-xs flex-col gap-4 text-sm text-white">
+      <aside className="pointer-events-none absolute top-6 left-6 flex w-[20rem] flex-col gap-4 text-sm text-white">
         <div className="pointer-events-auto rounded-xl bg-slate-900/80 p-4 shadow-lg backdrop-blur">
           <p className="text-[0.7rem] uppercase tracking-[0.3em] text-slate-400">
             Exchange Topology
@@ -885,48 +1157,226 @@ export default function ExchangeMap() {
 
         <div className="pointer-events-auto rounded-xl bg-slate-900/80 p-4 shadow-lg backdrop-blur">
           <p className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-500">
-            Cloud Providers
+            Control Panel
           </p>
-          <ul className="mt-3 flex flex-col gap-2">
-            {(Object.entries(PROVIDER_COLORS) as [CloudProvider, string][]).map(
-              ([provider, color]) => {
-                const isActive = visibleProviders[provider];
-                return (
-                  <li
-                    key={provider}
-                    className="flex items-center justify-between text-xs"
-                  >
-                    <span className="flex items-center gap-2">
+
+          <div className="mt-3 flex flex-col gap-3">
+            <label className="flex flex-col gap-1 text-xs">
+              <span className="uppercase tracking-[0.25em] text-slate-500">
+                Quick Search
+              </span>
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Exchange or region..."
+                className="w-full rounded-md border border-white/10 bg-slate-900/80 px-3 py-2 text-xs text-slate-100 outline-none focus:border-cyan-400"
+              />
+            </label>
+            {searchQuery && (
+              <ul className="max-h-32 overflow-y-auto rounded-lg border border-white/10 bg-slate-950/80 text-xs text-slate-200">
+                {searchResults.length === 0 && (
+                  <li className="px-3 py-2 text-slate-500">No matches found</li>
+                )}
+                {searchResults.map((result) => (
+                  <li key={`${result.type}-${result.id}`}>
+                    <button
+                      type="button"
+                      onClick={() => handleSearchSelect(result)}
+                      disabled={result.disabled}
+                      className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition ${
+                        result.disabled
+                          ? 'cursor-not-allowed text-slate-500'
+                          : 'hover:bg-slate-800/60'
+                      }`}
+                    >
+                      <span className="flex flex-col">
+                        <span className="font-medium text-slate-100">
+                          {result.label}
+                        </span>
+                        <span className="text-[0.65rem] text-slate-400">
+                          {result.meta}
+                        </span>
+                      </span>
                       <span
-                        className="h-3 w-3 rounded-full transition-opacity"
+                        className="h-2.5 w-2.5 flex-shrink-0 rounded-full"
                         style={{
-                          backgroundColor: color,
-                          opacity: isActive ? 1 : 0.3,
+                          backgroundColor: PROVIDER_COLORS[result.provider],
+                          opacity: result.disabled ? 0.4 : 1,
                         }}
                       />
-                      <span className="font-medium">{provider}</span>
-                    </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <label className="flex flex-col gap-1 text-xs">
+              <span className="uppercase tracking-[0.25em] text-slate-500">
+                Display Exchange
+              </span>
+              <select
+                value={displayExchangeFilter}
+                onChange={(event) => setDisplayExchangeFilter(event.target.value)}
+                className="rounded-md border border-white/10 bg-slate-900/80 px-2 py-1 text-slate-100 outline-none focus:border-cyan-400"
+              >
+                {exchangeFilterOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="flex flex-col gap-2 text-xs">
+              <span className="uppercase tracking-[0.25em] text-slate-500">
+                Cloud Providers
+              </span>
+              <ul className="flex flex-col gap-2">
+                {(Object.entries(PROVIDER_COLORS) as [CloudProvider, string][]).map(
+                  ([provider, color]) => {
+                    const isActive = visibleProviders[provider];
+                    return (
+                      <li key={provider} className="flex items-center justify-between">
+                        <span className="flex items-center gap-2">
+                          <span
+                            className="h-3 w-3 rounded-full transition-opacity"
+                            style={{
+                              backgroundColor: color,
+                              opacity: isActive ? 1 : 0.3,
+                            }}
+                          />
+                          <span className="font-medium">{provider}</span>
+                        </span>
+                        <label className="inline-flex cursor-pointer items-center gap-2">
+                          <span className="text-[0.7rem] uppercase tracking-[0.2em] text-slate-500">
+                            {isActive ? 'On' : 'Off'}
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={isActive}
+                            onChange={() => toggleProviderVisibility(provider)}
+                            className="h-3.5 w-3.5 accent-slate-200"
+                          />
+                        </label>
+                      </li>
+                    );
+                  }
+                )}
+              </ul>
+            </div>
+
+            <div className="flex flex-col gap-2 text-xs">
+              <span className="uppercase tracking-[0.25em] text-slate-500">
+                Latency Range
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {(Object.keys(LATENCY_COLORS) as LatencyStatus[]).map((status) => (
+                  <button
+                    key={status}
+                    type="button"
+                    onClick={() => toggleLatencyFilter(status)}
+                    className={`rounded-full px-3 py-1 text-[0.7rem] font-medium transition ${
+                      latencyFilters[status]
+                        ? 'bg-slate-100 text-slate-900'
+                        : 'bg-slate-800/80 text-slate-400 hover:bg-slate-700/80'
+                    }`}
+                  >
+                    {status}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 text-xs">
+              <span className="uppercase tracking-[0.25em] text-slate-500">
+                Layers
+              </span>
+              <ul className="flex flex-col gap-2">
+                {[
+                  { key: 'realtime', label: 'Real-time Latency' },
+                  { key: 'history', label: 'History Panel' },
+                  { key: 'regions', label: 'Region Boundaries' },
+                ].map((layer) => (
+                  <li key={layer.key} className="flex items-center justify-between">
+                    <span className="font-medium">{layer.label}</span>
                     <label className="inline-flex cursor-pointer items-center gap-2">
                       <span className="text-[0.7rem] uppercase tracking-[0.2em] text-slate-500">
-                        {isActive ? 'On' : 'Off'}
+                        {layerVisibility[layer.key as keyof LayerVisibilityState] ? 'On' : 'Off'}
                       </span>
                       <input
                         type="checkbox"
-                        checked={isActive}
-                        onChange={() => toggleProviderVisibility(provider)}
+                        checked={layerVisibility[layer.key as keyof LayerVisibilityState]}
+                        onChange={() =>
+                          toggleLayerVisibility(layer.key as keyof LayerVisibilityState)
+                        }
                         className="h-3.5 w-3.5 accent-slate-200"
                       />
                     </label>
                   </li>
-                );
-              }
-            )}
-          </ul>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <div className="pointer-events-none absolute top-6 right-6 flex flex-col gap-4 text-sm text-white">
+        <div className="pointer-events-auto rounded-xl bg-slate-900/85 p-4 shadow-xl backdrop-blur">
+          <p className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-500">
+            Performance Snapshot
+          </p>
+          <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-slate-200">
+            <MetricTile label="Status">
+              <span
+                className={`font-semibold ${
+                  metrics.status === 'Operational'
+                    ? 'text-emerald-300'
+                    : metrics.status === 'Paused'
+                    ? 'text-slate-300'
+                    : 'text-amber-300'
+                }`}
+              >
+                {metrics.status}
+              </span>
+            </MetricTile>
+            <MetricTile label="Active Samples">
+              <span className="font-medium text-slate-100">
+                {metrics.sampleCount}
+              </span>
+            </MetricTile>
+            <MetricTile label="Visible Regions">
+              <span className="font-medium text-slate-100">
+                {metrics.visibleRegionCount}
+              </span>
+            </MetricTile>
+            <MetricTile label="Avg Latency">
+              <span className="font-medium text-slate-100">
+                {metrics.averageLatency !== null
+                  ? `${metrics.averageLatency.toFixed(1)} ms`
+                  : '—'}
+              </span>
+            </MetricTile>
+            <MetricTile label="Min">
+              <span className="font-medium text-slate-100">
+                {metrics.minLatency !== null
+                  ? `${metrics.minLatency.toFixed(1)} ms`
+                  : '—'}
+              </span>
+            </MetricTile>
+            <MetricTile label="Max">
+              <span className="font-medium text-slate-100">
+                {metrics.maxLatency !== null
+                  ? `${metrics.maxLatency.toFixed(1)} ms`
+                  : '—'}
+              </span>
+            </MetricTile>
+          </div>
         </div>
 
-        <div className="pointer-events-auto rounded-xl bg-slate-900/80 p-4 shadow-lg backdrop-blur">
+        <div className="pointer-events-auto rounded-xl bg-slate-900/85 p-4 shadow-xl backdrop-blur">
           <p className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-500">
-            Latency Ranges
+            Latency Bands
           </p>
           <ul className="mt-3 flex flex-col gap-2">
             <li className="flex items-center justify-between text-xs">
@@ -947,7 +1397,9 @@ export default function ExchangeMap() {
                 />
                 <span>Medium</span>
               </span>
-              <span>{LATENCY_THRESHOLDS.low} - {LATENCY_THRESHOLDS.medium} ms</span>
+              <span>
+                {LATENCY_THRESHOLDS.low} - {LATENCY_THRESHOLDS.medium} ms
+              </span>
             </li>
             <li className="flex items-center justify-between text-xs">
               <span className="flex items-center gap-2">
@@ -961,60 +1413,69 @@ export default function ExchangeMap() {
             </li>
           </ul>
         </div>
+      </div>
 
-        {selectedRegionDetails && (
-          <div className="pointer-events-auto rounded-xl bg-slate-900/80 p-4 shadow-lg backdrop-blur">
-            <p className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-500">
+      {selectedRegionDetails && (
+        <div className="pointer-events-none absolute bottom-6 left-1/2 w-[22rem] -translate-x-1/2 text-sm text-white">
+          <div className="pointer-events-auto rounded-2xl bg-slate-900/85 p-4 text-slate-200 shadow-2xl backdrop-blur">
+            <p className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-500 text-center">
               Region Details
             </p>
-            <h3 className="mt-2 text-base font-semibold">
+            <h3 className="mt-2 text-lg font-semibold text-center">
               {selectedRegionDetails.name}
             </h3>
-            <p className="mt-1 text-xs text-slate-300">
+            <p className="mt-1 text-xs text-center text-slate-300">
               {selectedRegionDetails.city}, {selectedRegionDetails.country}
             </p>
-            <ul className="mt-3 flex flex-col gap-2 text-xs text-slate-300">
-              <li className="flex items-center justify-between">
-                <span className="text-slate-400">Provider</span>
+            <ul className="mt-4 grid grid-cols-3 gap-3 text-xs text-slate-300">
+              <li className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-slate-900/60 px-3 py-2">
+                <span className="text-[0.55rem] uppercase tracking-[0.3em] text-slate-500">
+                  Provider
+                </span>
                 <span className="font-medium text-slate-100">
                   {selectedRegionDetails.provider}
                 </span>
               </li>
-              <li className="flex items-center justify-between">
-                <span className="text-slate-400">Region Code</span>
+              <li className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-slate-900/60 px-3 py-2">
+                <span className="text-[0.55rem] uppercase tracking-[0.3em] text-slate-500">
+                  Region
+                </span>
                 <span className="font-medium text-slate-100">
                   {selectedRegionDetails.regionCode}
                 </span>
               </li>
-              <li className="flex items-center justify-between">
-                <span className="text-slate-400">Server Count</span>
+              <li className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-slate-900/60 px-3 py-2">
+                <span className="text-[0.55rem] uppercase tracking-[0.3em] text-slate-500">
+                  Servers
+                </span>
                 <span className="font-medium text-slate-100">
                   {selectedRegionDetails.serverCount}
                 </span>
               </li>
             </ul>
           </div>
-        )}
+        </div>
+      )}
 
-      </aside>
-
-      <div className="pointer-events-none absolute bottom-6 right-6 max-w-lg text-white">
-        <LatencyHistoryPanel
-          exchangeOptions={exchangeOptions}
-          regionOptions={regionOptions}
-          selectedExchange={selectedExchange}
-          onSelectExchange={setSelectedExchange}
-          selectedRegion={selectedRegion}
-          onSelectRegion={setSelectedRegion}
-          selectedRange={selectedRange}
-          onSelectRange={setSelectedRange}
-          history={historyPoints}
-          stats={historyStats}
-          loading={historyLoading}
-          error={historyError}
-          lastUpdatedLabel={formattedHistoryQueriedAt}
-        />
-      </div>
+      {layerVisibility.history && (
+        <div className="pointer-events-none absolute bottom-6 right-6 max-w-lg text-white">
+          <LatencyHistoryPanel
+            exchangeOptions={exchangeOptions}
+            regionOptions={regionOptions}
+            selectedExchange={selectedExchange}
+            onSelectExchange={setSelectedExchange}
+            selectedRegion={selectedRegion}
+            onSelectRegion={setSelectedRegion}
+            selectedRange={selectedRange}
+            onSelectRange={setSelectedRange}
+            history={historyPoints}
+            stats={historyStats}
+            loading={historyLoading}
+            error={historyError}
+            lastUpdatedLabel={formattedHistoryQueriedAt}
+          />
+        </div>
+      )}
 
       {!accessToken && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-950/80">
@@ -1050,12 +1511,21 @@ function getLatencyStatus(value: number | null): LatencyStatus {
  */
 function toFeatureCollection(
   latencyByRegion: Record<string, LatencySnapshot | undefined>,
-  providerVisibility?: ProviderVisibilityMap
+  config: FeatureCollectionConfig = {}
 ): FeatureCollection<LineString> {
+  if (config.realtimeEnabled === false) {
+    return {
+      type: 'FeatureCollection',
+      features: [],
+    };
+  }
   const features: Feature<LineString>[] = [];
 
   CLOUD_REGIONS.forEach((region) => {
-    if (providerVisibility && providerVisibility[region.provider] === false) {
+    if (
+      config.providerVisibility &&
+      config.providerVisibility[region.provider] === false
+    ) {
       return;
     }
     // Look up the most recent latency for this region (if Cloudflare provided one).
@@ -1068,8 +1538,18 @@ function toFeatureCollection(
     const color = LATENCY_COLORS[status];
     const latencyLabel =
       latencyValue !== null ? `${latencyValue.toFixed(1)} ms` : undefined;
+    if (config.allowedStatuses && !config.allowedStatuses[status]) {
+      return;
+    }
 
     EXCHANGE_LOCATIONS.forEach((exchange) => {
+      if (
+        config.exchangeFilter &&
+        config.exchangeFilter !== EXCHANGE_DISPLAY_ALL &&
+        exchange.id !== config.exchangeFilter
+      ) {
+        return;
+      }
       // Each exchange-region pair becomes one animated line on the globe.
       features.push({
         type: 'Feature',
@@ -1187,5 +1667,21 @@ function handleResize() {
   const height = root.clientHeight;
   root.style.setProperty('--viewport-width', `${width}px`);
   root.style.setProperty('--viewport-height', `${height}px`);
+}
+
+type MetricTileProps = {
+  label: string;
+  children: React.ReactNode;
+};
+
+function MetricTile({ label, children }: MetricTileProps) {
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-white/10 bg-slate-900/60 px-3 py-2">
+      <span className="text-[0.6rem] uppercase tracking-[0.35em] text-slate-500">
+        {label}
+      </span>
+      <div>{children}</div>
+    </div>
+  );
 }
 

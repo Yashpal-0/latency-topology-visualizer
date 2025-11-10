@@ -107,12 +107,17 @@ export default function LatencyHistoryPanel({
               className="rounded-md border border-white/10 bg-slate-900/80 px-2 py-1 text-slate-100 outline-none focus:border-cyan-400"
               value={selectedExchange}
               onChange={(event) => onSelectExchange(event.target.value)}
+              disabled={exchangeOptions.length === 0}
             >
-              {exchangeOptions.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label}
-                </option>
-              ))}
+              {exchangeOptions.length === 0 ? (
+                <option value="">No exchanges available</option>
+              ) : (
+                exchangeOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))
+              )}
             </select>
           </label>
 
@@ -124,12 +129,17 @@ export default function LatencyHistoryPanel({
               className="rounded-md border border-white/10 bg-slate-900/80 px-2 py-1 text-slate-100 outline-none focus:border-cyan-400"
               value={selectedRegion}
               onChange={(event) => onSelectRegion(event.target.value)}
+              disabled={regionOptions.length === 0}
             >
-              {regionOptions.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label}
-                </option>
-              ))}
+              {regionOptions.length === 0 ? (
+                <option value="">No regions available</option>
+              ) : (
+                regionOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))
+              )}
             </select>
           </label>
 
