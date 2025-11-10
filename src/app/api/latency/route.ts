@@ -1,10 +1,14 @@
 import { NextRequest } from "next/server";
+import { CLOUD_REGIONS } from "@/data/network";
+import type { LatencyHistoryPoint, TimeRangeKey } from "@/types/latency";
 
 /**
  * API Route: /api/latency
  * -----------------------
- * Acts as a lightweight proxy in front of Cloudflare Radar's Internet Quality Index (IQI) timeseries endpoint.
- * This keeps our Mapbox client clean (no secret tokens) and allows for basic shaping of the response.
+ * Returns a lightweight snapshot derived from the `/api/latency/history`
+ * endpoint so the client can consume the freshest datapoint while avoiding
+ * duplicating transformation logic. Results are cached for ~10 seconds so we
+ * only re-query Cloudflare (through the history endpoint) at that cadence.
  */
 
 type LatencySnapshot = {
@@ -16,287 +20,191 @@ type LatencySnapshot = {
   capturedAt: string;
 };
 
-type RegionDescriptor = {
-  id: string;
-  countryCode: string;
+type CacheEntry = {
+  data: LatencySnapshot[];
+  fetchedAt: number;
 };
 
-const CLOUD_REGIONS: RegionDescriptor[] = [
-  { id: "aws-virginia", countryCode: "US" },
-  { id: "aws-london", countryCode: "GB" },
-  { id: "aws-frankfurt", countryCode: "DE" },
-  { id: "gcp-singapore", countryCode: "SG" },
-  { id: "gcp-california", countryCode: "US" },
-  { id: "gcp-hongkong", countryCode: "HK" },
-  { id: "azure-amsterdam", countryCode: "NL" },
-  { id: "azure-hongkong", countryCode: "HK" },
-  { id: "azure-zurich", countryCode: "CH" },
-  { id: "azure-seoul", countryCode: "KR" },
-];
+const CACHE_TTL_MS = 10_000;
+const snapshotCache = new Map<string, CacheEntry>();
 
 export async function GET(request: NextRequest) {
-  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
-
-  if (!apiToken) {
-    // With no token we cannot hit the Radar API, so inform the client explicitly.
+  if (!process.env.CLOUDFLARE_API_TOKEN) {
     return Response.json(
       { message: "Cloudflare API token not configured." },
       { status: 500 }
     );
   }
 
-  const { searchParams } = new URL(request.url);
+  const searchParams = request.nextUrl.searchParams;
   const requestedRegionIds = searchParams.get("regions");
+  const rangeParam = parseRangeParam(searchParams.get("range"));
 
   const regionIds = requestedRegionIds
-    ? requestedRegionIds.split(",").map((value) => value.trim())
+    ? requestedRegionIds
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0)
     : CLOUD_REGIONS.map((item) => item.id);
 
-  const knownRegions = regionIds
-    .map((regionId) => CLOUD_REGIONS.find((item) => item.id === regionId))
-    .filter((item): item is RegionDescriptor => Boolean(item));
+  const uniqueRegionIds = Array.from(new Set(regionIds));
+
+  const knownRegions = uniqueRegionIds
+    .map((regionId) =>
+      CLOUD_REGIONS.find((item) => item.id === regionId)
+    )
+    .filter(
+      (item): item is (typeof CLOUD_REGIONS)[number] => Boolean(item)
+    );
 
   if (!knownRegions.length) {
-    // Reject unknown regions early to avoid unnecessary upstream calls.
     return Response.json(
       { message: "No matching Cloudflare regions found for request." },
       { status: 400 }
     );
   }
 
-  const uniqueCountryCodes = Array.from(
-    new Set(knownRegions.map((item) => item.countryCode))
+  const cacheKey = createCacheKey(uniqueRegionIds, rangeParam);
+  const now = Date.now();
+  const cached = snapshotCache.get(cacheKey);
+
+  if (cached && now - cached.fetchedAt < CACHE_TTL_MS) {
+    return Response.json(
+      {
+        data: cached.data,
+        cachedAt: new Date(cached.fetchedAt).toISOString(),
+        cacheTtlMs: CACHE_TTL_MS,
+      },
+      {
+        status: 200,
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
+    );
+  }
+
+  const origin = request.nextUrl.origin;
+
+  const snapshots = await Promise.all(
+    knownRegions.map((region) =>
+      fetchLatestHistorySnapshot({
+        origin,
+        regionId: region.id,
+        countryCode: region.countryCode,
+        range: rangeParam,
+      })
+    )
   );
 
-  const endpoint =
-    "https://api.cloudflare.com/client/v4/radar/quality/iqi/timeseries_groups";
-  const metricsByLocation = new Map<
-    string,
+  snapshotCache.set(cacheKey, { data: snapshots, fetchedAt: now });
+
+  return Response.json(
     {
-      latencyIdle: number | null;
-      latencyLoaded: number | null;
-      jitterIdle: number | null;
-      capturedAt: string;
+      data: snapshots,
+      cachedAt: new Date(now).toISOString(),
+      cacheTtlMs: CACHE_TTL_MS,
+    },
+    {
+      status: 200,
+      headers: {
+        "Cache-Control": "no-store",
+      },
     }
-  >();
-
-  await Promise.all(
-    uniqueCountryCodes.map(async (code) => {
-      const url = new URL(endpoint);
-      url.searchParams.set("metric", "LATENCY");
-      url.searchParams.set("location", code);
-      url.searchParams.set("format", "JSON");
-      url.searchParams.set("dateRange", "1d");
-
-      try {
-        console.log(
-          "[latency-snapshot] Cloudflare request:",
-          url.toString()
-        );
-        const response = await fetch(url, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${apiToken}`,
-            "Content-Type": "application/json",
-          },
-          cache: "no-store",
-        });
-
-        const payloadText = await response.text();
-        if (!response.ok) {
-          console.error(
-            "Cloudflare latency summary error payload:",
-            payloadText
-          );
-          throw new Error(
-            `Cloudflare returned ${response.status}${
-              payloadText ? `: ${payloadText}` : ""
-            }`
-          );
-        }
-
-        const payload = JSON.parse(payloadText) as {
-          result?: {
-            serie_0?: Record<string, unknown>;
-            meta?: { lastUpdated?: string };
-          };
-        };
-
-        const latestPoint = extractLatestLatencyPoint(payload.result?.serie_0);
-
-        if (!latestPoint) {
-          console.warn(
-            `No latency points returned for location ${code}. Payload:`,
-            payload.result
-          );
-          return;
-        }
-
-        metricsByLocation.set(code, {
-          latencyIdle: latestPoint.latencyIdle,
-          latencyLoaded: latestPoint.latencyLoaded,
-          jitterIdle: latestPoint.jitterIdle,
-          capturedAt: latestPoint.timestamp,
-        });
-      } catch (error) {
-        console.error("Failed to fetch Cloudflare latency summary:", error);
-      }
-    })
   );
+}
 
-  const responsePayload: LatencySnapshot[] = knownRegions.map((region) => {
-    // Convert the map keyed by location into the shape expected by the client.
-    const metrics = metricsByLocation.get(region.countryCode);
-    return {
-      regionId: region.id,
-      location: region.countryCode,
-      latencyIdle: metrics?.latencyIdle ?? null,
-      latencyLoaded: metrics?.latencyLoaded ?? null,
-      jitterIdle: metrics?.jitterIdle ?? null,
-      capturedAt: metrics?.capturedAt ?? new Date().toISOString(),
+function createCacheKey(regionIds: string[], range: TimeRangeKey): string {
+  return `${range}::${regionIds
+    .slice()
+    .sort((a, b) => a.localeCompare(b))
+    .join(",")}`;
+}
+
+function parseRangeParam(value: string | null): TimeRangeKey {
+  if (isTimeRangeKey(value)) {
+    return value;
+  }
+  return "1h";
+}
+
+function isTimeRangeKey(value: string | null): value is TimeRangeKey {
+  return value === "1h" || value === "24h" || value === "7d" || value === "30d";
+}
+
+async function fetchLatestHistorySnapshot({
+  origin,
+  regionId,
+  countryCode,
+  range,
+}: {
+  origin: string;
+  regionId: string;
+  countryCode: string;
+  range: TimeRangeKey;
+}): Promise<LatencySnapshot> {
+  const historyUrl = new URL("/api/latency/history", origin);
+  historyUrl.searchParams.set("region", regionId);
+  historyUrl.searchParams.set("range", range);
+
+  try {
+    console.log(
+      "[latency-snapshot] history request:",
+      historyUrl.toString()
+    );
+    const response = await fetch(historyUrl.toString(), {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      console.error(
+        `[latency-snapshot] History request failed for region ${regionId}:`,
+        response.status,
+        await response.text().catch(() => "")
+      );
+      return buildEmptySnapshot(regionId, countryCode);
+    }
+
+    const payload = (await response.json()) as {
+      points?: LatencyHistoryPoint[];
+      queriedAt?: string;
     };
-  });
 
-  return Response.json({ data: responsePayload }, { status: 200 });
+    const points = Array.isArray(payload.points) ? payload.points : [];
+    const latestPoint =
+      points.length > 0 ? points[points.length - 1] : null;
+
+    return {
+      regionId,
+      location: countryCode,
+      latencyIdle: latestPoint?.latencyIdle ?? null,
+      latencyLoaded: latestPoint?.latencyLoaded ?? null,
+      jitterIdle: latestPoint?.jitterIdle ?? null,
+      capturedAt:
+        latestPoint?.timestamp ??
+        payload.queriedAt ??
+        new Date().toISOString(),
+    };
+  } catch (error) {
+    console.error(
+      `[latency-snapshot] Failed to fetch history for region ${regionId}:`,
+      error
+    );
+    return buildEmptySnapshot(regionId, countryCode);
+  }
 }
 
-function parseNullableNumber(value: unknown): number | null {
-  if (value === null || value === undefined) {
-    return null;
-  }
-
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : null;
-  }
-
-  if (typeof value === "string") {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? numeric : null;
-  }
-
-  return null;
+function buildEmptySnapshot(
+  regionId: string,
+  countryCode: string
+): LatencySnapshot {
+  return {
+    regionId,
+    location: countryCode,
+    latencyIdle: null,
+    latencyLoaded: null,
+    jitterIdle: null,
+    capturedAt: new Date().toISOString(),
+  };
 }
-
-function extractLatestLatencyPoint(
-  serie: Record<string, unknown> | Array<Record<string, unknown>> | undefined
-):
-  | {
-      timestamp: string;
-      latencyIdle: number | null;
-      latencyLoaded: number | null;
-      jitterIdle: number | null;
-    }
-  | null {
-  if (!serie) {
-    return null;
-  }
-
-  if (Array.isArray(serie)) {
-    for (let index = serie.length - 1; index >= 0; index -= 1) {
-      const entry = serie[index] ?? {};
-      const timestamp = extractTimestamp(entry);
-      if (!timestamp) {
-        continue;
-      }
-      const metrics =
-        (entry.metrics as Record<string, unknown> | undefined) ?? entry;
-      const latencyIdle = parseNullableNumber(
-        metrics?.latencyIdle ?? metrics?.p50 ?? metrics?.latency
-      );
-      const latencyLoaded = parseNullableNumber(
-        metrics?.latencyLoaded ?? metrics?.p75 ?? metrics?.p90
-      );
-      const jitterIdle = parseNullableNumber(
-        metrics?.jitterIdle ?? metrics?.p25 ?? metrics?.latencyJitter
-      );
-
-      if (latencyIdle !== null || latencyLoaded !== null || jitterIdle !== null) {
-        return {
-          timestamp,
-          latencyIdle,
-          latencyLoaded,
-          jitterIdle,
-        };
-      }
-    }
-    return null;
-  }
-
-  const timestamps = toArrayOfStrings(serie.timestamps);
-  if (!timestamps.length) {
-    return null;
-  }
-
-  const p50 = toArrayOfNumbers(serie.p50);
-  const p75 = toArrayOfNumbers(serie.p75);
-  const p25 = toArrayOfNumbers(serie.p25);
-
-  for (let index = timestamps.length - 1; index >= 0; index -= 1) {
-    const timestamp = timestamps[index];
-    const latencyIdle = p50[index] ?? null;
-    const latencyLoaded = p75[index] ?? null;
-    const jitterIdle = p25[index] ?? null;
-
-    if (
-      latencyIdle !== null ||
-      latencyLoaded !== null ||
-      jitterIdle !== null
-    ) {
-      return {
-        timestamp,
-        latencyIdle,
-        latencyLoaded,
-        jitterIdle,
-      };
-    }
-  }
-
-  return null;
-}
-
-function extractTimestamp(entry: Record<string, unknown>): string | null {
-  const dimensions = entry.dimensions as
-    | { datetime?: string; timestamp?: string }
-    | undefined;
-  const candidates: Array<unknown> = [
-    dimensions?.datetime,
-    dimensions?.timestamp,
-    entry.timestamp,
-    entry.datetime,
-    entry.time,
-  ];
-
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.length > 0) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
-function toArrayOfStrings(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value
-    .map((entry) => {
-      if (typeof entry === "string") {
-        return entry;
-      }
-      if (entry === null || entry === undefined) {
-        return "";
-      }
-      return String(entry);
-    })
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
-}
-
-function toArrayOfNumbers(value: unknown): Array<number | null> {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.map((entry) => parseNullableNumber(entry));
-}
-

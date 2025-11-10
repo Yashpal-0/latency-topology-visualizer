@@ -12,9 +12,9 @@
  * Inline comments throughout the module document the main data-flow and rendering decisions.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
-import type { Feature, FeatureCollection, LineString } from 'geojson';
+import type { Feature, FeatureCollection, LineString, Polygon } from 'geojson';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import {
   CLOUD_REGIONS,
@@ -45,6 +45,20 @@ const PROVIDER_COLORS: Record<CloudProvider, string> = {
   Azure: '#8b5cf6',
 };
 
+const PROVIDER_FILL_COLORS: Record<CloudProvider, string> = {
+  AWS: 'rgba(249, 115, 22, 0.22)',
+  GCP: 'rgba(34, 211, 238, 0.22)',
+  Azure: 'rgba(139, 92, 246, 0.22)',
+};
+
+type ProviderVisibilityMap = Record<CloudProvider, boolean>;
+
+type RegionMarkerEntry = {
+  marker: mapboxgl.Marker;
+  region: (typeof CLOUD_REGIONS)[number];
+  element: HTMLDivElement;
+};
+
 const LATENCY_COLORS: Record<LatencyStatus, string> = {
   low: '#22c55e',
   medium: '#facc15',
@@ -63,6 +77,13 @@ const LATENCY_THRESHOLDS = {
 const CONNECTION_SOURCE_ID = 'latency-connections';
 const CONNECTION_LAYER_ID = 'latency-lines';
 const CONNECTION_LABEL_LAYER_ID = 'latency-labels';
+
+const REGION_BOUNDARY_SOURCE_ID = 'region-boundaries';
+const REGION_BOUNDARY_LAYER_ID = 'region-boundary-fill';
+const REGION_BOUNDARY_OUTLINE_LAYER_ID = 'region-boundary-outline';
+const REGION_BOUNDARY_RADIUS_KM = 600;
+const REGION_BOUNDARY_SEGMENTS = 64;
+const EARTH_RADIUS_KM = 6371;
 
 // Sequence of dash patterns used to animate latency lines.
 const dashArraySequence: [number, number, number][] = [
@@ -84,12 +105,19 @@ export default function ExchangeMap() {
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const popupRef = useRef<mapboxgl.Popup | null>(null);
   const exchangeMarkersRef = useRef<mapboxgl.Marker[]>([]);
-  const regionMarkersRef = useRef<mapboxgl.Marker[]>([]);
+  const regionMarkersRef = useRef<RegionMarkerEntry[]>([]);
   const dashIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [latencySnapshots, setLatencySnapshots] = useState<
     Record<string, LatencySnapshot>
   >({});
   const [latencyError, setLatencyError] = useState<string | null>(null);
+  const [visibleProviders, setVisibleProviders] = useState<ProviderVisibilityMap>(
+    {
+      AWS: true,
+      GCP: true,
+      Azure: true,
+    }
+  );
   const [selectedExchange, setSelectedExchange] = useState<string>(
     DEFAULT_EXCHANGE_ID || EXCHANGE_LOCATIONS[0]?.id || ''
   );
@@ -104,6 +132,7 @@ export default function ExchangeMap() {
   const [historyStats, setHistoryStats] = useState<HistoryStats | null>(null);
   const [historyQueriedAt, setHistoryQueriedAt] = useState<string | null>(null);
   const accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN;
+  const visibleProvidersRef = useRef(visibleProviders);
 
   // Derive the freshest timestamp so the legend can display "Updated HH:MM:SS".
   const lastUpdated = useMemo(() => {
@@ -124,10 +153,25 @@ export default function ExchangeMap() {
   }, [selectedExchange]);
 
   useEffect(() => {
-    if (!selectedRegion && CLOUD_REGIONS.length > 0) {
-      setSelectedRegion(CLOUD_REGIONS[0].id);
+    visibleProvidersRef.current = visibleProviders;
+  }, [visibleProviders]);
+
+  useEffect(() => {
+    const current = CLOUD_REGIONS.find((entry) => entry.id === selectedRegion);
+    if (current && visibleProviders[current.provider]) {
+      return;
     }
-  }, [selectedRegion]);
+
+    const fallback = CLOUD_REGIONS.find(
+      (entry) => visibleProviders[entry.provider]
+    );
+    if (fallback?.id && fallback.id !== selectedRegion) {
+      setSelectedRegion(fallback.id);
+    }
+    if (!fallback && selectedRegion) {
+      setSelectedRegion('');
+    }
+  }, [selectedRegion, visibleProviders]);
 
   const exchangeOptions = useMemo(
     () =>
@@ -140,11 +184,13 @@ export default function ExchangeMap() {
 
   const regionOptions = useMemo(
     () =>
-      CLOUD_REGIONS.map((region) => ({
-        id: region.id,
-        label: `${region.name} • ${region.city}`,
-      })),
-    []
+      CLOUD_REGIONS.filter((region) => visibleProviders[region.provider]).map(
+        (region) => ({
+          id: region.id,
+          label: `${region.name} • ${region.city}`,
+        })
+      ),
+    [visibleProviders]
   );
 
   const formattedHistoryQueriedAt = useMemo(() => {
@@ -157,6 +203,19 @@ export default function ExchangeMap() {
       second: '2-digit',
     }).format(new Date(historyQueriedAt));
   }, [historyQueriedAt]);
+
+  const toggleProviderVisibility = useCallback((provider: CloudProvider) => {
+    setVisibleProviders((prev) => ({
+      ...prev,
+      [provider]: !prev[provider],
+    }));
+  }, []);
+
+  const selectedRegionDetails = useMemo(
+    () =>
+      CLOUD_REGIONS.find((region) => region.id === selectedRegion) ?? null,
+    [selectedRegion]
+  );
 
   useEffect(() => {
     // Initialise Mapbox once we have a DOM node and token.
@@ -228,10 +287,110 @@ export default function ExchangeMap() {
     };
 
     const handleLoad = () => {
+      map.addSource(REGION_BOUNDARY_SOURCE_ID, {
+        type: 'geojson',
+        data: toRegionBoundaryCollection(visibleProvidersRef.current),
+      });
+
+      map.addLayer({
+        id: REGION_BOUNDARY_LAYER_ID,
+        type: 'fill',
+        source: REGION_BOUNDARY_SOURCE_ID,
+        paint: {
+          'fill-color': ['get', 'fillColor'],
+          'fill-opacity': ['get', 'fillOpacity'],
+        },
+      });
+
+      map.addLayer({
+        id: REGION_BOUNDARY_OUTLINE_LAYER_ID,
+        type: 'line',
+        source: REGION_BOUNDARY_SOURCE_ID,
+        paint: {
+          'line-color': ['get', 'strokeColor'],
+          'line-width': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            0,
+            0.2,
+            4,
+            0.8,
+            8,
+            1.6,
+          ],
+          'line-dasharray': [2, 2],
+          'line-opacity': 0.9,
+        },
+      });
+
+      const boundaryEnter = (event: mapboxgl.MapLayerMouseEvent) => {
+        map.getCanvas().style.cursor = 'pointer';
+        const feature = event.features?.[0];
+        if (!feature || !popupRef.current) {
+          return;
+        }
+        const properties = feature.properties as
+          | {
+              regionName?: string;
+              provider?: CloudProvider;
+              regionCode?: string;
+              serverCount?: number;
+            }
+          | undefined;
+        popupRef.current
+          .setLngLat(event.lngLat)
+          .setHTML(
+            `<div class="latency-popup">
+              <h3>${properties?.regionName ?? 'Region'}</h3>
+              <p>${properties?.provider ?? ''} • ${properties?.regionCode ?? ''}</p>
+              <span class="latency-chip latency-low">${properties?.serverCount ?? 0} servers</span>
+            </div>`
+          )
+          .addTo(map);
+      };
+
+      const boundaryLeave = () => {
+        map.getCanvas().style.cursor = '';
+        popupRef.current?.remove();
+      };
+
+      const boundaryClick = (event: mapboxgl.MapLayerMouseEvent) => {
+        const feature = event.features?.[0];
+        if (!feature) {
+          return;
+        }
+        const properties = feature.properties as
+          | {
+              regionId?: string;
+            }
+          | undefined;
+        if (properties?.regionId) {
+          setSelectedRegion(properties.regionId);
+          const region = CLOUD_REGIONS.find(
+            (entry) => entry.id === properties.regionId
+          );
+          if (region) {
+            map.flyTo({
+              center: region.coordinates,
+              zoom: Math.max(map.getZoom(), 3.4),
+              pitch: 50,
+              bearing: map.getBearing(),
+              duration: 1600,
+              essential: true,
+            });
+          }
+        }
+      };
+
+      map.on('mouseenter', REGION_BOUNDARY_LAYER_ID, boundaryEnter);
+      map.on('mouseleave', REGION_BOUNDARY_LAYER_ID, boundaryLeave);
+      map.on('click', REGION_BOUNDARY_LAYER_ID, boundaryClick);
+
       // Latency source & layers
       map.addSource(CONNECTION_SOURCE_ID, {
         type: 'geojson',
-        data: toFeatureCollection({}),
+        data: toFeatureCollection({}, visibleProvidersRef.current),
       });
 
       map.addLayer({
@@ -315,6 +474,8 @@ export default function ExchangeMap() {
               provider: CloudProvider;
               latencyLabel?: string;
               status: LatencyStatus;
+              regionCode?: string;
+              serverCount?: number;
             }
           | undefined;
 
@@ -325,6 +486,9 @@ export default function ExchangeMap() {
             `<div class="latency-popup">
               <h3>${properties?.exchangeName ?? 'Exchange'}</h3>
               <p>${properties?.regionName ?? 'Region'} • ${properties?.provider ?? ''}</p>
+              <p style="font-size:0.75rem;color:rgba(148,163,184,0.9);margin:0.15rem 0 0;">
+                ${properties?.regionCode ?? ''} • ${properties?.serverCount ?? 0} servers
+              </p>
               <span class="latency-chip latency-${properties?.status ?? 'unknown'}">${latencyLabel}</span>
             </div>`
           )
@@ -450,6 +614,8 @@ export default function ExchangeMap() {
         el.className = 'cloud-region-marker';
         el.style.setProperty('--marker-color', PROVIDER_COLORS[region.provider]);
         el.dataset.regionId = region.id;
+        el.dataset.provider = region.provider;
+        el.style.display = visibleProvidersRef.current[region.provider] ? '' : 'none';
 
         const marker = new mapboxgl.Marker({
           element: el,
@@ -465,6 +631,9 @@ export default function ExchangeMap() {
               `<div class="marker-popup">
                 <h3>${region.name}</h3>
                 <p>${region.city}, ${region.country}</p>
+                <p style="font-size:0.75rem;color:rgba(148,163,184,0.9);margin:0.15rem 0 0;">
+                  ${region.regionCode.toUpperCase()} • ${region.serverCount} servers
+                </p>
                 <span class="badge">${region.provider}</span>
               </div>`
             )
@@ -485,15 +654,31 @@ export default function ExchangeMap() {
             duration: 1400,
             essential: true,
           });
+          popupRef.current
+            ?.setLngLat(region.coordinates)
+            .setHTML(
+              `<div class="marker-popup">
+                <h3>${region.name}</h3>
+                <p>${region.city}, ${region.country}</p>
+                <p style="font-size:0.75rem;color:rgba(148,163,184,0.9);margin:0.15rem 0 0;">
+                  ${region.regionCode.toUpperCase()} • ${region.serverCount} servers
+                </p>
+                <span class="badge">${region.provider}</span>
+              </div>`
+            )
+            .addTo(map);
         });
 
-        return marker;
+        return { marker, region, element: el };
       });
 
       map.on('remove', () => {
         map.off('mouseenter', CONNECTION_LAYER_ID, lineEnter);
         map.off('mouseleave', CONNECTION_LAYER_ID, lineLeave);
         map.off('click', CONNECTION_LAYER_ID, lineClick);
+        map.off('mouseenter', REGION_BOUNDARY_LAYER_ID, boundaryEnter);
+        map.off('mouseleave', REGION_BOUNDARY_LAYER_ID, boundaryLeave);
+        map.off('click', REGION_BOUNDARY_LAYER_ID, boundaryClick);
         if (dashIntervalRef.current) {
           clearInterval(dashIntervalRef.current);
           dashIntervalRef.current = null;
@@ -513,7 +698,7 @@ export default function ExchangeMap() {
         dashIntervalRef.current = null;
       }
       exchangeMarkersRef.current.forEach((marker) => marker.remove());
-      regionMarkersRef.current.forEach((marker) => marker.remove());
+      regionMarkersRef.current.forEach(({ marker }) => marker.remove());
       popupRef.current?.remove();
       map.off('style.load', handleStyleLoad);
       map.off('load', handleLoad);
@@ -533,8 +718,8 @@ export default function ExchangeMap() {
     if (!source) {
       return;
     }
-    source.setData(toFeatureCollection(latencySnapshots));
-  }, [latencySnapshots]);
+    source.setData(toFeatureCollection(latencySnapshots, visibleProviders));
+  }, [latencySnapshots, visibleProviders]);
 
   useEffect(() => {
     // Poll Cloudflare Radar via our API every 10 seconds.
@@ -587,6 +772,21 @@ export default function ExchangeMap() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (mapRef.current) {
+      const boundarySource = mapRef.current.getSource(
+        REGION_BOUNDARY_SOURCE_ID
+      ) as mapboxgl.GeoJSONSource | undefined;
+      if (boundarySource) {
+        boundarySource.setData(toRegionBoundaryCollection(visibleProviders));
+      }
+    }
+
+    regionMarkersRef.current.forEach(({ element, region }) => {
+      element.style.display = visibleProviders[region.provider] ? '' : 'none';
+    });
+  }, [visibleProviders]);
 
   useEffect(() => {
     if (!selectedRegion) {
@@ -688,15 +888,39 @@ export default function ExchangeMap() {
             Cloud Providers
           </p>
           <ul className="mt-3 flex flex-col gap-2">
-            {Object.entries(PROVIDER_COLORS).map(([provider, color]) => (
-              <li key={provider} className="flex items-center gap-2">
-                <span
-                  className="h-3 w-3 rounded-full"
-                  style={{ backgroundColor: color }}
-                />
-                <span className="text-xs font-medium">{provider}</span>
-              </li>
-            ))}
+            {(Object.entries(PROVIDER_COLORS) as [CloudProvider, string][]).map(
+              ([provider, color]) => {
+                const isActive = visibleProviders[provider];
+                return (
+                  <li
+                    key={provider}
+                    className="flex items-center justify-between text-xs"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span
+                        className="h-3 w-3 rounded-full transition-opacity"
+                        style={{
+                          backgroundColor: color,
+                          opacity: isActive ? 1 : 0.3,
+                        }}
+                      />
+                      <span className="font-medium">{provider}</span>
+                    </span>
+                    <label className="inline-flex cursor-pointer items-center gap-2">
+                      <span className="text-[0.7rem] uppercase tracking-[0.2em] text-slate-500">
+                        {isActive ? 'On' : 'Off'}
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={isActive}
+                        onChange={() => toggleProviderVisibility(provider)}
+                        className="h-3.5 w-3.5 accent-slate-200"
+                      />
+                    </label>
+                  </li>
+                );
+              }
+            )}
           </ul>
         </div>
 
@@ -737,6 +961,40 @@ export default function ExchangeMap() {
             </li>
           </ul>
         </div>
+
+        {selectedRegionDetails && (
+          <div className="pointer-events-auto rounded-xl bg-slate-900/80 p-4 shadow-lg backdrop-blur">
+            <p className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-500">
+              Region Details
+            </p>
+            <h3 className="mt-2 text-base font-semibold">
+              {selectedRegionDetails.name}
+            </h3>
+            <p className="mt-1 text-xs text-slate-300">
+              {selectedRegionDetails.city}, {selectedRegionDetails.country}
+            </p>
+            <ul className="mt-3 flex flex-col gap-2 text-xs text-slate-300">
+              <li className="flex items-center justify-between">
+                <span className="text-slate-400">Provider</span>
+                <span className="font-medium text-slate-100">
+                  {selectedRegionDetails.provider}
+                </span>
+              </li>
+              <li className="flex items-center justify-between">
+                <span className="text-slate-400">Region Code</span>
+                <span className="font-medium text-slate-100">
+                  {selectedRegionDetails.regionCode}
+                </span>
+              </li>
+              <li className="flex items-center justify-between">
+                <span className="text-slate-400">Server Count</span>
+                <span className="font-medium text-slate-100">
+                  {selectedRegionDetails.serverCount}
+                </span>
+              </li>
+            </ul>
+          </div>
+        )}
 
       </aside>
 
@@ -791,11 +1049,15 @@ function getLatencyStatus(value: number | null): LatencyStatus {
  * Convert the latest latency snapshots into a GeoJSON FeatureCollection understood by Mapbox.
  */
 function toFeatureCollection(
-  latencyByRegion: Record<string, LatencySnapshot | undefined>
+  latencyByRegion: Record<string, LatencySnapshot | undefined>,
+  providerVisibility?: ProviderVisibilityMap
 ): FeatureCollection<LineString> {
   const features: Feature<LineString>[] = [];
 
   CLOUD_REGIONS.forEach((region) => {
+    if (providerVisibility && providerVisibility[region.provider] === false) {
+      return;
+    }
     // Look up the most recent latency for this region (if Cloudflare provided one).
     const latencySnapshot = latencyByRegion[region.id];
     const latencyValue =
@@ -826,6 +1088,8 @@ function toFeatureCollection(
           latencyLabel,
           status,
           color,
+          serverCount: region.serverCount,
+          regionCode: region.regionCode,
         },
       });
     });
@@ -835,6 +1099,84 @@ function toFeatureCollection(
     type: 'FeatureCollection',
     features,
   };
+}
+
+function toRegionBoundaryCollection(
+  providerVisibility: ProviderVisibilityMap,
+  radiusKm: number = REGION_BOUNDARY_RADIUS_KM
+): FeatureCollection<Polygon> {
+  const features: Feature<Polygon>[] = [];
+
+  CLOUD_REGIONS.forEach((region) => {
+    if (providerVisibility[region.provider] === false) {
+      return;
+    }
+    const coordinates = generateCircleCoordinates(
+      region.coordinates,
+      radiusKm,
+      REGION_BOUNDARY_SEGMENTS
+    );
+
+    features.push({
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [coordinates],
+      },
+      properties: {
+        id: region.id,
+        regionId: region.id,
+        regionName: region.name,
+        provider: region.provider,
+        regionCode: region.regionCode,
+        serverCount: region.serverCount,
+        fillColor: PROVIDER_FILL_COLORS[region.provider],
+        strokeColor: PROVIDER_COLORS[region.provider],
+        fillOpacity: 0.22,
+      },
+    });
+  });
+
+  return {
+    type: 'FeatureCollection',
+    features,
+  };
+}
+
+function generateCircleCoordinates(
+  [centerLng, centerLat]: [number, number],
+  radiusKm: number,
+  steps: number
+): [number, number][] {
+  const coordinates: [number, number][] = [];
+  const centerLatRad = (centerLat * Math.PI) / 180;
+  const centerLngRad = (centerLng * Math.PI) / 180;
+  const angularDistance = radiusKm / EARTH_RADIUS_KM;
+
+  for (let i = 0; i <= steps; i += 1) {
+    const bearing = (2 * Math.PI * i) / steps;
+    const pointLat = Math.asin(
+      Math.sin(centerLatRad) * Math.cos(angularDistance) +
+        Math.cos(centerLatRad) *
+          Math.sin(angularDistance) *
+          Math.cos(bearing)
+    );
+    const pointLng =
+      centerLngRad +
+      Math.atan2(
+        Math.sin(bearing) *
+          Math.sin(angularDistance) *
+          Math.cos(centerLatRad),
+        Math.cos(angularDistance) -
+          Math.sin(centerLatRad) * Math.sin(pointLat)
+      );
+
+    const lngDeg = ((pointLng * 180) / Math.PI + 540) % 360 - 180;
+    const latDeg = (pointLat * 180) / Math.PI;
+    coordinates.push([lngDeg, latDeg]);
+  }
+
+  return coordinates;
 }
 
 

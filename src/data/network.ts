@@ -18,6 +18,7 @@ export type CloudRegion = {
   countryCode: string;
   regionCode: string;
   coordinates: [number, number];
+  serverCount: number;
 };
 
 export const EXCHANGE_LOCATIONS: ExchangeLocation[] = [
@@ -121,6 +122,7 @@ export const CLOUD_REGIONS: CloudRegion[] = [
     countryCode: 'US',
     regionCode: 'us-east-1',
     coordinates: [-77.4875, 39.0438],
+    serverCount: 18,
   },
   {
     id: 'aws-london',
@@ -131,6 +133,7 @@ export const CLOUD_REGIONS: CloudRegion[] = [
     countryCode: 'GB',
     regionCode: 'eu-west-2',
     coordinates: [-0.118092, 51.509865],
+    serverCount: 12,
   },
   {
     id: 'aws-frankfurt',
@@ -141,6 +144,7 @@ export const CLOUD_REGIONS: CloudRegion[] = [
     countryCode: 'DE',
     regionCode: 'eu-central-1',
     coordinates: [8.6821, 50.1109],
+    serverCount: 15,
   },
   {
     id: 'gcp-singapore',
@@ -151,6 +155,7 @@ export const CLOUD_REGIONS: CloudRegion[] = [
     countryCode: 'SG',
     regionCode: 'asia-southeast1',
     coordinates: [103.851959, 1.29027],
+    serverCount: 9,
   },
   {
     id: 'gcp-california',
@@ -161,6 +166,7 @@ export const CLOUD_REGIONS: CloudRegion[] = [
     countryCode: 'US',
     regionCode: 'us-west2',
     coordinates: [-118.2417, 34.0549],
+    serverCount: 11,
   },
   {
     id: 'gcp-hongkong',
@@ -171,6 +177,7 @@ export const CLOUD_REGIONS: CloudRegion[] = [
     countryCode: 'HK',
     regionCode: 'asia-east2',
     coordinates: [114.1694, 22.3193],
+    serverCount: 10,
   },
   {
     id: 'azure-amsterdam',
@@ -181,6 +188,7 @@ export const CLOUD_REGIONS: CloudRegion[] = [
     countryCode: 'NL',
     regionCode: 'westeurope',
     coordinates: [4.9041, 52.3676],
+    serverCount: 8,
   },
   {
     id: 'azure-hongkong',
@@ -191,6 +199,7 @@ export const CLOUD_REGIONS: CloudRegion[] = [
     countryCode: 'HK',
     regionCode: 'eastasia',
     coordinates: [114.1694, 22.3193],
+    serverCount: 7,
   },
   {
     id: 'azure-zurich',
@@ -201,6 +210,7 @@ export const CLOUD_REGIONS: CloudRegion[] = [
     countryCode: 'CH',
     regionCode: 'switzerlandnorth',
     coordinates: [8.5417, 47.3769],
+    serverCount: 6,
   },
   {
     id: 'azure-seoul',
@@ -211,6 +221,7 @@ export const CLOUD_REGIONS: CloudRegion[] = [
     countryCode: 'KR',
     regionCode: 'koreacentral',
     coordinates: [126.978, 37.5665],
+    serverCount: 9,
   },
 ];
 
