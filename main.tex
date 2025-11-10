@@ -1,0 +1,483 @@
+\documentclass[a4paper,11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{tablefootnote}
+\usepackage{float}
+\usepackage{multirow}
+\usepackage{tabularx}
+\usepackage{caption}
+\usepackage{subcaption}
+
+\definecolor{latencyGreen}{HTML}{22C55E}
+\definecolor{latencyYellow}{HTML}{FACC15}
+\definecolor{latencyRed}{HTML}{F97316}
+\definecolor{latencyUnknown}{HTML}{94A3B8}
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numbersep=5pt,
+  xleftmargin=1em,
+  framexleftmargin=1em,
+}
+
+\title{\textbf{Latency Topology Visualizer}\\
+Documentation and Instructions to Run}
+\author{Yashpal Yadav}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{center}
+\href{https://github.com/Yashpal-0/latency-topology-visualizer}{\texttt{https://github.com/Yashpal-0/latency-topology-visualizer}}
+\end{center}
+
+\section*{Quick Run Instructions}
+\begin{enumerate}[noitemsep]
+  \item Ensure \texttt{Node.js 18+} and \texttt{npm} are installed.
+  \item Copy the provided \texttt{.env.local} file to project root location.
+  \item Install dependencies: \texttt{npm install}
+  \item Start the development server: \texttt{npm run dev}
+  \item For production build: \texttt{npm run build} then \texttt{npm run start}
+\end{enumerate}
+
+
+\section{Assignment Summary}
+\subsection{Objective}
+Design and implement a Next.js TypeScript application that renders a 3D world map to visualise:
+\begin{itemize}[noitemsep]
+  \item Major cryptocurrency exchange server locations
+  \item Real-time network latency between cloud co-location regions (AWS, GCP, Azure) and exchanges
+  \item Historical latency trends with statistical summarisation
+\end{itemize}
+
+\subsection{Key Functional Requirements}
+\begin{enumerate}[label=\textbf{F\arabic*}]
+  \item Interactive 3D globe with smooth camera controls using a modern mapping library
+  \item Distinct exchange markers with metadata on hover/click, provider-based legend
+  \item Animated, colour-coded real-time latency connections refreshed every 5--10 seconds
+  \item Historical latency chart with range selector (1h, 24h, 7d, 30d) and descriptive statistics
+  \item Cloud provider region visualisation with filters and server information overlays
+  \item Control panel for search, filtering, layer toggles, and performance metrics
+  \item Responsive and touch-friendly design suitable for desktop and mobile contexts
+\end{enumerate}
+
+\subsection{Technical Requirements Overview}
+\begin{itemize}[noitemsep]
+  \item TypeScript across the codebase, leveraging React Hooks and the Next.js App Router
+  \item Real-time data sourced from Cloudflare Radar (free tier) via custom API routes
+  \item Proper error handling, caching, and loading states
+  \item Performance-conscious rendering and animation strategies
+  \item Documentation, video walkthrough, and reproducible setup instructions
+\end{itemize}
+
+\section{Solution Architecture}
+\subsection{High-Level Overview}
+\begin{itemize}[noitemsep]
+  \item \textbf{Frontend (Client Components)}: Built on Next.js with the App Router. The root page instantiates a single \texttt{ExchangeMap} component, which orchestrates Mapbox GL for the 3D globe, overlays, control panel, and the historical latency panel.
+  \item \textbf{API Layer (Server Components)}: Located under \texttt{src/app/api}, exposing:
+        \begin{itemize}[noitemsep]
+          \item \texttt{/api/latency}: returns real-time snapshots derived from Cloudflare Radar.
+          \item \texttt{/api/latency/history}: returns historical timeseries data and summary statistics.
+        \end{itemize}
+  \item \textbf{Static Data and Types}:
+        \begin{itemize}[noitemsep]
+          \item \texttt{src/data/network.ts}: curated exchange and cloud region metadata.
+          \item \texttt{src/types/latency.ts}: shared TypeScript contracts for latency data structures.
+        \end{itemize}
+  \item \textbf{Styling \& Theming}: Tailwind CSS (via \texttt{@import "tailwindcss"}), supplemented by custom CSS in \texttt{globals.css} for marker aesthetics and dark theme ambience.
+\end{itemize}
+
+The application follows a declarative, component-driven architecture, with React state managing UI selections and Mapbox layers updated via imperative APIs to avoid unnecessary remounts.
+
+\section{Project Structure}
+\begin{verbatim}
+src/
+├── app/
+│   ├── layout.tsx         # Global HTML shell, fonts, metadata
+│   ├── page.tsx           # Top-level page rendering ExchangeMap
+│   ├── globals.css        # Tailwind base + custom CSS for markers/popups
+│   └── api/
+│       ├── latency/
+│       │   └── route.ts   # Real-time snapshot endpoint
+│       └── latency/history/
+│           └── route.ts   # Historical latency endpoint
+├── components/
+│   ├── ExchangeMap.tsx    # Main client component (map, overlays, controls)
+│   └── LatencyHistoryPanel.tsx
+│                           # Recharts line chart subcomponent
+├── data/
+│   └── network.ts         # Static lists for exchanges and cloud regions
+└── types/
+    └── latency.ts         # Shared TypeScript types for latency structures
+\end{verbatim}
+
+\section{Key Technologies}
+\begin{itemize}[noitemsep]
+  \item \textbf{Next.js 13+ App Router}: Server-side API routes and client components.
+  \item \textbf{TypeScript}: Type safety across components, APIs, and data processing.
+  \item \textbf{Mapbox GL JS}: Globe projection, geographic layers, custom markers, animation.
+  \item \textbf{Cloudflare Radar IQI API}: Public latency metrics.
+  \item \textbf{Recharts}: Responsive timeseries chart for historical latency.
+  \item \textbf{Tailwind CSS + Custom CSS}: Layout, typography, and marker styling.
+\end{itemize}
+
+\section{Static Data Definitions}
+\subsection{Exchange Catalogue}
+Located in \texttt{src/data/network.ts}:
+\begin{itemize}[noitemsep]
+  \item An array of \texttt{ExchangeLocation} objects with fields: \texttt{id}, \texttt{name}, \texttt{city}, \texttt{country}, \texttt{provider} (\texttt{"AWS" | "GCP" | "Azure"}), and geographic coordinates.
+  \item This dataset drives:
+        \begin{itemize}[noitemsep]
+          \item Mapbox markers and layer metadata
+          \item Control panel dropdowns
+          \item Search and filter features
+        \end{itemize}
+  \item Example snippet:
+
+\begin{lstlisting}[style=code]
+{
+  id: 'binance-ldn',
+  name: 'Binance',
+  city: 'London',
+  country: 'United Kingdom',
+  provider: 'AWS',
+  coordinates: [-0.1276, 51.5072],
+}
+\end{lstlisting}
+\end{itemize}
+
+\subsection{Cloud Regions Catalogue}
+Also in \texttt{src/data/network.ts}:
+\begin{itemize}[noitemsep]
+  \item Array of \texttt{CloudRegion} entries representing AWS, GCP, and Azure co-location regions.
+  \item Fields include: \texttt{name}, \texttt{regionCode}, \texttt{serverCount}, coordinates.
+  \item Consumed by:
+        \begin{itemize}[noitemsep]
+          \item Mapbox markers and polygon overlays
+          \item API endpoints for ID validation
+          \item Control panel filters and region details card
+        \end{itemize}
+\end{itemize}
+
+\subsection{Shared Types}
+Defined in \texttt{src/types/latency.ts}:
+\begin{itemize}[noitemsep]
+  \item \texttt{TimeRangeKey}: union of allowed ranges
+  \item \texttt{LatencyHistoryPoint}: standardised structure for a single historical sample
+  \item \texttt{HistoryStats}: container for min/max/avg/samples metadata
+  \item These types are imported across client and server code, guaranteeing consistent interfaces.
+\end{itemize}
+
+\section{API Layer}
+\subsection{\texttt{/api/latency} (Real-Time Snapshots)}
+\paragraph{Path} \texttt{src/app/api/latency/route.ts}
+
+\paragraph{Responsibilities}
+\begin{itemize}[noitemsep]
+  \item Accepts optional \texttt{regions} query param (comma-separated region IDs) and \texttt{range}.
+  \item Validates the presence of \texttt{CLOUDFLARE\_API\_TOKEN}; returns \texttt{500} otherwise.
+  \item Utilises an in-memory cache (TTL: 10 seconds) keyed by the set of region IDs and the range.
+  \item For cache misses, delegates to the history endpoint to fetch the latest sample per region.
+  \item Returns a concise payload:
+
+\begin{lstlisting}[style=code]
+{
+  data: Array<{
+    regionId: string;
+    location: string;
+    latencyIdle: number | null;
+    latencyLoaded: number | null;
+    jitterIdle: number | null;
+    capturedAt: string;
+  }>;
+  cachedAt: string;
+  cacheTtlMs: number;
+}
+\end{lstlisting}
+\end{itemize}
+
+\paragraph{Error Handling}
+\begin{itemize}[noitemsep]
+  \item Missing token $\rightarrow$ \texttt{500}
+  \item Unknown region IDs $\rightarrow$ \texttt{400}
+  \item Downstream fetch failures produce descriptive error logs and degrade gracefully.
+\end{itemize}
+
+\paragraph{Caching Strategy}
+\begin{itemize}[noitemsep]
+  \item \texttt{Map<string, CacheEntry>} where each entry stores \texttt{data} and \texttt{fetchedAt}.
+  \item Prevents hammering Cloudflare's API while still providing a near-real-time experience.
+\end{itemize}
+
+\subsection{\texttt{/api/latency/history} (Historical Data)}
+\paragraph{Path} \texttt{src/app/api/latency/history/route.ts}
+
+\paragraph{Responsibilities}
+\begin{itemize}[noitemsep]
+  \item Accepts \texttt{region} and \texttt{range} query parameters.
+  \item Validates the target region against \texttt{CLOUD\_REGIONS}.
+  \item Translates the range key to a duration (e.g. \texttt{"24h"} $\rightarrow$ 24 hours).
+  \item Builds a Cloudflare Radar IQI API request, buffering the end time by 60 seconds (per API requirement).
+  \item Parses varied response formats (series, histograms, percentile series) into a canonical array of \texttt{LatencyHistoryPoint}.
+  \item Computes statistics via \texttt{computeHistoryStats}.
+  \item Returns:
+
+\begin{lstlisting}[style=code]
+{
+  points: LatencyHistoryPoint[];
+  stats: HistoryStats | null;
+  queriedAt: string;
+}
+\end{lstlisting}
+\end{itemize}
+
+\paragraph{Resilience}
+\begin{itemize}[noitemsep]
+  \item Reflective logging for debugging (e.g.\ evidence of external errors).
+  \item Graceful handling of missing fields, fallback to empty arrays, and null statistics.
+  \item Strict typing and helper functions to unify the response shape irrespective of Cloudflare's payload variant.
+\end{itemize}
+
+\section{Client-Side Visualisation}
+\subsection{\texttt{ExchangeMap} Component}
+\paragraph{File} \texttt{src/components/ExchangeMap.tsx}
+
+\paragraph{Mapbox GL Setup}
+\begin{itemize}[noitemsep]
+  \item Waits for \texttt{containerRef} and \texttt{NEXT\_PUBLIC\_MAPBOX\_ACCESS\_TOKEN}.
+  \item Configures the globe projection (\texttt{projection: 'globe'}) with pitch, bearing, and zoom suited to a global overview.
+  \item Adds navigation, fullscreen, and scale controls for user interaction.
+  \item Enhances visuals by enabling fog, terrain, and atmospheric sky when the style loads.
+  \item Registers custom sources/layers:
+        \begin{itemize}[noitemsep]
+          \item Region boundary polygons (\texttt{fill} and \texttt{line} layers).
+          \item Latency connections (\texttt{line} layer) and label overlay (\texttt{symbol} layer).
+        \end{itemize}
+\end{itemize}
+
+\paragraph{State Management}
+\begin{itemize}[noitemsep]
+  \item React \texttt{useState} for:
+        \begin{itemize}[noitemsep]
+          \item Live latency snapshots
+          \item Provider visibility toggles
+          \item Layer toggles (real-time lines, history panel, region boundaries)
+          \item Exchange filter, search query, and selection state
+          \item Historical chart data, stats, loading and error flags
+        \end{itemize}
+  \item \texttt{useRef} mirrors to synchronise with external Mapbox callbacks (avoids stale closures).
+\end{itemize}
+
+\paragraph{Marker Rendering}
+\begin{itemize}[noitemsep]
+  \item Exchanges: circular markers with glow using custom CSS (\texttt{.exchange-marker}). Hover and click interactions show popups and animate camera transitions via \texttt{map.flyTo}.
+  \item Cloud Regions: diamond markers (\texttt{.cloud-region-marker}). Display additional metadata (region code, server count) in popups.
+  \item All markers stored in refs to toggle visibility without remounting.
+\end{itemize}
+
+\paragraph{Latency Connections}
+\begin{itemize}[noitemsep]
+  \item Generated via helper \texttt{toFeatureCollection}, mapping exchange-region pairs to \texttt{LineString} features.
+  \item Latency value determines colour (green/yellow/red/grey) using \texttt{getLatencyStatus}.
+  \item Animated using \texttt{line-dasharray} updates on a timer to simulate pulses.
+  \item Hover popups show exchange name, region, provider, server count, and current latency.
+\end{itemize}
+
+\paragraph{Polling Loop}
+\begin{itemize}[noitemsep]
+  \item Effect hook triggers an immediate fetch to \texttt{/api/latency}, then every 10 seconds.
+  \item Updates state with the latest snapshots; handles errors by presenting messaging in the UI.
+  \item Aborts on component unmount to prevent memory leaks.
+\end{itemize}
+
+\paragraph{Layer Visibility}
+\begin{itemize}[noitemsep]
+  \item Toggling \texttt{layerVisibility.realtime} hides/shows the Mapbox line and symbol layers.
+  \item Toggling \texttt{layerVisibility.regions} hides/shows polygon fill and outline layers, and loops through markers to toggle their DOM visibility.
+  \item Toggling \texttt{layerVisibility.history} controls whether the historical panel is rendered, and clears data when disabled.
+\end{itemize}
+
+\paragraph{Control Panel and Overlays}
+\begin{itemize}[noitemsep]
+  \item \textbf{Left Column}: introduction card, last update time, error banner, search input with results list, exchange filter dropdown, cloud provider toggles, latency range pills, and layer toggles.
+  \item \textbf{Right Column}: performance snapshot showing overall status, sample counts, visible regions, and min/avg/max metrics; latency legend clarifying colour thresholds.
+  \item \textbf{Bottom Centre}: region details card summarising provider, region code, server count, and city/country for the active region.
+  \item \textbf{Bottom Right}: conditional rendering of \texttt{LatencyHistoryPanel} when history layer is active.
+  \item \textbf{Missing Token Overlay}: if \texttt{NEXT\_PUBLIC\_MAPBOX\_ACCESS\_TOKEN} is absent, a blocking message instructs the user to configure it.
+\end{itemize}
+
+\paragraph{Responsiveness}
+\begin{itemize}[noitemsep]
+  \item Overlays use flexible widths and rely on Tailwind utilities to adapt to viewport changes.
+  \item Mapbox GL natively supports touch gestures, enabling mobile pan/zoom/rotate without extra code.
+  \item \texttt{handleResize} writes viewport dimensions to CSS variables, ready for advanced responsive styling needs.
+\end{itemize}
+
+\subsection{\texttt{LatencyHistoryPanel} Component}
+\paragraph{File} \texttt{src/components/LatencyHistoryPanel.tsx}
+
+\paragraph{Purpose}
+\begin{itemize}[noitemsep]
+  \item Present historical latency for the active exchange-region pair.
+  \item Offer selectors for exchange, region, and time range.
+  \item Display min/avg/max statistics and a responsive Recharts line chart.
+\end{itemize}
+
+\paragraph{Key Features}
+\begin{itemize}[noitemsep]
+  \item Accepts props from \texttt{ExchangeMap} (options, selections, data, status).
+  \item Formats latency values to two decimal places with units.
+  \item Handles loading, error, and empty states within the chart container.
+  \item Uses \texttt{ResponsiveContainer} so the chart fills its parent area seamlessly.
+  \item Axis labels and tooltips use locale-aware formatting for timestamps.
+\end{itemize}
+
+\section{Data Flow and State Synchronisation}
+\subsection{Real-Time Polling Loop}
+\begin{enumerate}[noitemsep]
+  \item Component mounts $\rightarrow$ fetch \texttt{/api/latency} with all region IDs.
+  \item API returns snapshots $\rightarrow$ convert to \texttt{Record<regionId, LatencySnapshot>} for O(1) lookup.
+  \item Update Mapbox GeoJSON source with \texttt{toFeatureCollection} respecting provider/latency filters.
+  \item Set a 10-second interval to repeat steps 1--3.
+  \item On unmount, clear interval and abort outstanding fetch.
+\end{enumerate}
+
+\subsection{Historical Fetch Cycle}
+Triggered whenever \texttt{selectedExchange}, \texttt{selectedRegion}, \texttt{selectedRange}, or history layer visibility changes.
+\begin{enumerate}[noitemsep]
+  \item Effect starts, sets loading true, clears previous error.
+  \item Builds query string with \texttt{region} and \texttt{range}.
+  \item Calls \texttt{/api/latency/history}, passing an \texttt{AbortController} signal.
+  \item On success, updates \texttt{historyPoints}, \texttt{historyStats}, and \texttt{historyQueriedAt}.
+  \item On failure, sets descriptive error message.
+  \item Ensures loading flag is reset unless the request was aborted.
+\end{enumerate}
+
+\section{Filtering, Search, and Layer Logic}
+\subsection{Provider Visibility}
+Stored in \texttt{visibleProviders}, e.g.
+\begin{lstlisting}[style=code]
+{ AWS: true, GCP: true, Azure: true }
+\end{lstlisting}
+\begin{itemize}[noitemsep]
+  \item Toggling updates React state and a ref mirror.
+  \item Mapbox boundary source is regenerated with only visible providers.
+  \item Region markers respected by toggling DOM visibility.
+  \item Performance metrics recompute visible region count accordingly.
+\end{itemize}
+
+\subsection{Latency Bands}
+\begin{itemize}[noitemsep]
+  \item Buttons control a \texttt{LatencyVisibilityMap}, e.g.:
+\begin{lstlisting}[style=code]
+{ low: true, medium: true, high: true, unknown: true }
+\end{lstlisting}
+  \item Prevents all bands from disabling simultaneously (maintains at least one active status).
+  \item \texttt{toFeatureCollection} only emits features whose status is enabled.
+\end{itemize}
+
+\subsection{Exchange Filter}
+\begin{itemize}[noitemsep]
+  \item Dropdown lets users pick a specific exchange or view all.
+  \item Filter affects which exchange-region lines appear on the globe.
+  \item Search selection also updates this value and flies to the chosen exchange.
+\end{itemize}
+
+\subsection{Search}
+\begin{itemize}[noitemsep]
+  \item Filters both exchanges and regions by name, city, or ID.
+  \item Results show the provider colour indicator; disabled if that provider is currently hidden.
+  \item Selecting a search result updates the relevant selection and flies the camera to that location.
+\end{itemize}
+
+\section{Styling and Visual Design}
+\subsection{Typography and Layout}
+\begin{itemize}[noitemsep]
+  \item Next.js \texttt{metadata} currently uses the default title/description and could be updated to project-specific copy.
+  \item Root layout loads Geist Sans and Geist Mono for consistent typography.
+  \item Tailwind utility classes create consistent spacing, rounding, and colour palette aligned with a dark trading-dashboard aesthetic.
+\end{itemize}
+
+\subsection{Custom CSS Highlights (\texttt{globals.css})}
+\begin{itemize}[noitemsep]
+  \item Marker shapes (\texttt{.exchange-marker}, \texttt{.cloud-region-marker}) with glow and pseudo-elements for stems/borders.
+  \item Popup styling (\texttt{.marker-popup}, \texttt{.latency-popup}) for legible, branded tooltips.
+  \item Latency chips (\texttt{.latency-low}, etc.) providing colour-coded labels reused across line popups and legend.
+  \item Body defaults fallback to system sans-serif if custom fonts fail.
+\end{itemize}
+
+\section{Performance Considerations}
+\begin{itemize}[noitemsep]
+  \item Real-time polling is throttled server-side via caching and client-side via a 10-second interval.
+  \item Mapbox GL layers use \texttt{setData} and layout/paint property updates rather than reconstructing the map instance.
+  \item Dash-array animation uses lightweight \texttt{setInterval}; cleared on unmount to avoid resource leaks.
+  \item Cloudflare fetches use \texttt{no-store} caching directive per API guidelines; errors produce concise fallback states.
+  \item Recharts disables animation for the line chart to reduce CPU load on frequent updates.
+\end{itemize}
+
+\section{Setup and Deployment}
+\subsection{Prerequisites}
+\begin{itemize}[noitemsep]
+  \item Node.js 18+
+  \item npm
+  \item Mapbox account for access token
+  \item Cloudflare API token (Radar IQI read access)
+\end{itemize}
+
+\subsection{Environment Variables}
+\texttt{.env.local} has been provided with the submission:
+
+
+\subsection{Installation and Running}
+\begin{verbatim}
+npm install
+npm run dev
+\end{verbatim}
+Open the provided localhost URL (typically \texttt{http://localhost:3000}). Ensure the browser console shows no missing-token messages.
+
+\subsection{Build}
+\begin{verbatim}
+npm run build
+npm run start
+\end{verbatim}
+Produces an optimised production build using Next.js.
+
+\section{Testing and Validation}
+\begin{itemize}[noitemsep]
+  \item Manual validation of all assignment requirements (map interaction, marker popups, latency animation, history panel toggles).
+  \item API error scenarios tested by removing tokens and verifying user-facing messages.
+  \item Responsiveness verified via browser device emulation (mobile/tablet).
+  \item Mapbox token overlay confirmed to prevent blank screen when misconfigured.
+  \item Future work: automated tests could be added for util functions (e.g. latency parsing) using Jest or Vitest.
+\end{itemize}
+
+\section{Assumptions \& Limitations}
+\begin{itemize}[noitemsep]
+  \item Cloudflare Radar provides region-level latency to ISP territories; exchange-to-region latency is approximated by linking known exchange locations to nearest co-location regions.
+  \item No persistent datastore is used—real-time and historical data are fetched on demand.
+  \item API rate limiting relies on Cloudflare’s public quota; additional caching or scheduling may be required for large scale deployment.
+  \item Mapbox GL requires WebGL; older devices/browsers may fall back to limited performance.
+  \item No heatmap overlay implemented; architecture allows easy extension by adding a new Mapbox source/layer.
+\end{itemize}
+
+\section{Potential Enhancements}
+\begin{itemize}[noitemsep]
+  \item Introduce great-circle arcs to better represent long-distance latency paths.
+  \item Layer in a latency heatmap by sampling points on the globe and colour coding via Mapbox raster layers.
+  \item Support dark/light theme toggling by extending Tailwind configuration and marker styling.
+  \item Persist user preferences (filters, toggles) via local storage or server state.
+  \item Expand data source to include specific exchange latency endpoints if available.
+  \item Incorporate trading volume or order flow animations for additional context.
+\end{itemize}
+
+
+\end{document}

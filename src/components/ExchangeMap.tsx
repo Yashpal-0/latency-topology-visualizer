@@ -101,8 +101,8 @@ const LATENCY_COLORS: Record<LatencyStatus, string> = {
 };
 
 const LATENCY_THRESHOLDS = {
-  low: 45,
-  medium: 110,
+  low: 30,
+  medium: 60,
 };
 
 // Static catalogue of the major exchanges we want to surface on the globe.
