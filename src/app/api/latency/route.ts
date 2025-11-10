@@ -3,7 +3,7 @@ import { NextRequest } from "next/server";
 /**
  * API Route: /api/latency
  * -----------------------
- * Acts as a lightweight proxy in front of Cloudflare Radar's Speed Test Summary endpoint.
+ * Acts as a lightweight proxy in front of Cloudflare Radar's Internet Quality Index (IQI) timeseries endpoint.
  * This keeps our Mapbox client clean (no secret tokens) and allows for basic shaping of the response.
  */
 
@@ -68,7 +68,8 @@ export async function GET(request: NextRequest) {
     new Set(knownRegions.map((item) => item.countryCode))
   );
 
-  const endpoint = "https://api.cloudflare.com/client/v4/radar/quality/speed/summary";
+  const endpoint =
+    "https://api.cloudflare.com/client/v4/radar/quality/iqi/timeseries_groups";
   const metricsByLocation = new Map<
     string,
     {
@@ -82,10 +83,16 @@ export async function GET(request: NextRequest) {
   await Promise.all(
     uniqueCountryCodes.map(async (code) => {
       const url = new URL(endpoint);
-      url.searchParams.append("location", code);
-      url.searchParams.append("limit", "1");
+      url.searchParams.set("metric", "LATENCY");
+      url.searchParams.set("location", code);
+      url.searchParams.set("format", "JSON");
+      url.searchParams.set("dateRange", "1d");
 
       try {
+        console.log(
+          "[latency-snapshot] Cloudflare request:",
+          url.toString()
+        );
         const response = await fetch(url, {
           method: "GET",
           headers: {
@@ -95,35 +102,41 @@ export async function GET(request: NextRequest) {
           cache: "no-store",
         });
 
+        const payloadText = await response.text();
         if (!response.ok) {
-          throw new Error(`Cloudflare returned ${response.status}`);
+          console.error(
+            "Cloudflare latency summary error payload:",
+            payloadText
+          );
+          throw new Error(
+            `Cloudflare returned ${response.status}${
+              payloadText ? `: ${payloadText}` : ""
+            }`
+          );
         }
 
-        const payload = (await response.json()) as {
+        const payload = JSON.parse(payloadText) as {
           result?: {
+            serie_0?: Record<string, unknown>;
             meta?: { lastUpdated?: string };
-            summary_0?: {
-              latencyIdle?: string | number;
-              latencyLoaded?: string | number;
-              jitterIdle?: string | number;
-            };
           };
         };
 
-        const summary = payload.result?.summary_0;
+        const latestPoint = extractLatestLatencyPoint(payload.result?.serie_0);
 
-        // Persist the metrics keyed by location so exchanges can look them up later.
+        if (!latestPoint) {
+          console.warn(
+            `No latency points returned for location ${code}. Payload:`,
+            payload.result
+          );
+          return;
+        }
+
         metricsByLocation.set(code, {
-          latencyIdle: summary?.latencyIdle
-            ? Number(summary.latencyIdle)
-            : null,
-          latencyLoaded: summary?.latencyLoaded
-            ? Number(summary.latencyLoaded)
-            : null,
-          jitterIdle: summary?.jitterIdle ? Number(summary.jitterIdle) : null,
-          capturedAt:
-            payload.result?.meta?.lastUpdated ??
-            new Date().toISOString(),
+          latencyIdle: latestPoint.latencyIdle,
+          latencyLoaded: latestPoint.latencyLoaded,
+          jitterIdle: latestPoint.jitterIdle,
+          capturedAt: latestPoint.timestamp,
         });
       } catch (error) {
         console.error("Failed to fetch Cloudflare latency summary:", error);
@@ -145,5 +158,145 @@ export async function GET(request: NextRequest) {
   });
 
   return Response.json({ data: responsePayload }, { status: 200 });
+}
+
+function parseNullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === "string") {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+
+  return null;
+}
+
+function extractLatestLatencyPoint(
+  serie: Record<string, unknown> | Array<Record<string, unknown>> | undefined
+):
+  | {
+      timestamp: string;
+      latencyIdle: number | null;
+      latencyLoaded: number | null;
+      jitterIdle: number | null;
+    }
+  | null {
+  if (!serie) {
+    return null;
+  }
+
+  if (Array.isArray(serie)) {
+    for (let index = serie.length - 1; index >= 0; index -= 1) {
+      const entry = serie[index] ?? {};
+      const timestamp = extractTimestamp(entry);
+      if (!timestamp) {
+        continue;
+      }
+      const metrics =
+        (entry.metrics as Record<string, unknown> | undefined) ?? entry;
+      const latencyIdle = parseNullableNumber(
+        metrics?.latencyIdle ?? metrics?.p50 ?? metrics?.latency
+      );
+      const latencyLoaded = parseNullableNumber(
+        metrics?.latencyLoaded ?? metrics?.p75 ?? metrics?.p90
+      );
+      const jitterIdle = parseNullableNumber(
+        metrics?.jitterIdle ?? metrics?.p25 ?? metrics?.latencyJitter
+      );
+
+      if (latencyIdle !== null || latencyLoaded !== null || jitterIdle !== null) {
+        return {
+          timestamp,
+          latencyIdle,
+          latencyLoaded,
+          jitterIdle,
+        };
+      }
+    }
+    return null;
+  }
+
+  const timestamps = toArrayOfStrings(serie.timestamps);
+  if (!timestamps.length) {
+    return null;
+  }
+
+  const p50 = toArrayOfNumbers(serie.p50);
+  const p75 = toArrayOfNumbers(serie.p75);
+  const p25 = toArrayOfNumbers(serie.p25);
+
+  for (let index = timestamps.length - 1; index >= 0; index -= 1) {
+    const timestamp = timestamps[index];
+    const latencyIdle = p50[index] ?? null;
+    const latencyLoaded = p75[index] ?? null;
+    const jitterIdle = p25[index] ?? null;
+
+    if (
+      latencyIdle !== null ||
+      latencyLoaded !== null ||
+      jitterIdle !== null
+    ) {
+      return {
+        timestamp,
+        latencyIdle,
+        latencyLoaded,
+        jitterIdle,
+      };
+    }
+  }
+
+  return null;
+}
+
+function extractTimestamp(entry: Record<string, unknown>): string | null {
+  const dimensions = entry.dimensions as
+    | { datetime?: string; timestamp?: string }
+    | undefined;
+  const candidates: Array<unknown> = [
+    dimensions?.datetime,
+    dimensions?.timestamp,
+    entry.timestamp,
+    entry.datetime,
+    entry.time,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.length > 0) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function toArrayOfStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((entry) => {
+      if (typeof entry === "string") {
+        return entry;
+      }
+      if (entry === null || entry === undefined) {
+        return "";
+      }
+      return String(entry);
+    })
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function toArrayOfNumbers(value: unknown): Array<number | null> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((entry) => parseNullableNumber(entry));
 }
 

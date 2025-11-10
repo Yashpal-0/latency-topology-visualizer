@@ -36,17 +36,21 @@ export async function GET(request: NextRequest) {
 
   const duration =
     TIME_RANGE_TO_DURATION[rangeParam] ?? TIME_RANGE_TO_DURATION['24h'];
-  const dateEnd = new Date();
+  const now = Date.now();
+  // Cloudflare Radar timeseries rejects end timestamps that are equal to "now".
+  // Subtract a small buffer so the requested window is safely in the past.
+  const dateEnd = new Date(now - 60 * 1000);
   const dateStart = new Date(dateEnd.getTime() - duration);
 
   const url = new URL(CLOUD_FLARE_IQI_ENDPOINT);
-  url.searchParams.set('metrics', 'latency_idle,latency_loaded,jitter_idle');
+  url.searchParams.set('metric', 'LATENCY');
   url.searchParams.set('location', region.countryCode);
   url.searchParams.set('dateStart', dateStart.toISOString());
   url.searchParams.set('dateEnd', dateEnd.toISOString());
   url.searchParams.set('format', 'JSON');
 
   try {
+    console.log('[latency-history] Cloudflare request:', url.toString());
     const response = await fetch(url.toString(), {
       method: 'GET',
       headers: {
@@ -68,11 +72,12 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const payload = (await response.json()) as {
-      result?: unknown;
-    };
+    const payload = (await response.json()) as { result?: unknown };
 
-    const points = extractHistoryPoints(payload);
+    const points = extractHistoryPoints(payload, {
+      dateStart,
+      dateEnd,
+    });
     const stats = computeHistoryStats(points);
 
     return Response.json(
@@ -96,19 +101,29 @@ export async function GET(request: NextRequest) {
   }
 }
 
-function extractHistoryPoints(payload: { result?: unknown }): LatencyHistoryPoint[] {
+function extractHistoryPoints(
+  payload: { result?: unknown },
+  context: { dateStart: Date; dateEnd: Date }
+): LatencyHistoryPoint[] {
   const result = payload.result as
     | {
         serie_0?:
-          | {
-              timestamps?: unknown;
+          | ({
               latencyIdle?: unknown;
               latency_idle?: unknown;
               latencyLoaded?: unknown;
               latency_loaded?: unknown;
               jitterIdle?: unknown;
               jitter_idle?: unknown;
-            }
+            } & Record<string, unknown>)
+          | Array<Record<string, unknown>>;
+        histogram_0?:
+          | ({
+              timestamps?: unknown;
+              buckets?: unknown;
+              values?: unknown;
+              data?: unknown;
+            } & Record<string, unknown>)
           | Array<Record<string, unknown>>;
       }
     | undefined;
@@ -118,6 +133,11 @@ function extractHistoryPoints(payload: { result?: unknown }): LatencyHistoryPoin
   }
 
   const rawSerie = result.serie_0;
+  const rawHistogram = (result as { histogram_0?: unknown }).histogram_0;
+
+  if (!rawSerie && rawHistogram) {
+    return extractHistogramPoints(rawHistogram, context);
+  }
 
   if (!rawSerie) {
     return [];
@@ -153,13 +173,24 @@ function extractHistoryPoints(payload: { result?: unknown }): LatencyHistoryPoin
       .filter((point): point is LatencyHistoryPoint => Boolean(point));
   }
 
+  const percentilePoints = extractPercentileSeries(
+    rawSerie as Record<string, unknown>
+  );
+  if (percentilePoints.length) {
+    return percentilePoints;
+  }
+
   const timestamps = toArrayOfStrings(
     (rawSerie as { timestamps?: unknown }).timestamps
   );
   const latencyIdle = toArrayOfNumbers(
-    (rawSerie as { latencyIdle?: unknown; latency_idle?: unknown })
-      .latencyIdle ??
-      (rawSerie as { latency_idle?: unknown }).latency_idle
+    (rawSerie as {
+      latencyIdle?: unknown;
+      latency_idle?: unknown;
+      values?: unknown;
+    }).latencyIdle ??
+      (rawSerie as { latency_idle?: unknown }).latency_idle ??
+      (rawSerie as { values?: unknown }).values
   );
   const latencyLoaded = toArrayOfNumbers(
     (rawSerie as { latencyLoaded?: unknown; latency_loaded?: unknown })
@@ -186,6 +217,59 @@ function extractHistoryPoints(payload: { result?: unknown }): LatencyHistoryPoin
     });
   }
   return points;
+}
+
+function extractPercentileSeries(rawSerie: Record<string, unknown>): LatencyHistoryPoint[] {
+  const timestamps = toArrayOfStrings(rawSerie.timestamps);
+  if (!timestamps.length) {
+    return [];
+  }
+
+  const p50 = toArrayOfNumbers(rawSerie.p50);
+  const p75 = toArrayOfNumbers(rawSerie.p75);
+  const p25 = toArrayOfNumbers(rawSerie.p25);
+
+  const points: LatencyHistoryPoint[] = [];
+  for (let index = 0; index < timestamps.length; index += 1) {
+    points.push({
+      timestamp: timestamps[index],
+      latencyIdle:
+        p50[index] !== undefined ? (p50[index] ?? null) : null,
+      latencyLoaded:
+        p75[index] !== undefined ? (p75[index] ?? null) : null,
+      jitterIdle:
+        p25[index] !== undefined ? (p25[index] ?? null) : null,
+    });
+  }
+
+  return points;
+}
+
+function extractHistogramPoints(
+  histogram: unknown,
+  context: { dateStart: Date; dateEnd: Date }
+): LatencyHistoryPoint[] {
+  const entries = normalizeHistogramEntries(histogram);
+  if (!entries.length) {
+    return [];
+  }
+
+  const startMs = context.dateStart.getTime();
+  const endMs = context.dateEnd.getTime();
+  const total = entries.length;
+  const step = total > 1 ? (endMs - startMs) / (total - 1) : 0;
+
+  return entries.map((entry, index) => {
+    const latency = parseLatencyFromHistogramEntry(entry);
+    const timestamp = new Date(startMs + step * index).toISOString();
+
+    return {
+      timestamp,
+      latencyIdle: latency,
+      latencyLoaded: null,
+      jitterIdle: null,
+    };
+  });
 }
 
 function normalizeHistoryPoint(entry: {
@@ -229,6 +313,81 @@ function toArrayOfNumbers(value: unknown): Array<number | null> {
     return value.map((item) => parseNullableNumber(item as never));
   }
   return [];
+}
+
+function normalizeHistogramEntries(histogram: unknown): Array<Record<string, unknown>> {
+  if (!histogram) {
+    return [];
+  }
+
+  if (Array.isArray(histogram)) {
+    return histogram as Array<Record<string, unknown>>;
+  }
+
+  if (typeof histogram === 'object') {
+    const buckets = (histogram as { buckets?: unknown }).buckets;
+    const data = (histogram as { data?: unknown }).data;
+    const values = (histogram as { values?: unknown }).values;
+
+    if (Array.isArray(buckets) && Array.isArray(values) && buckets.length === values.length) {
+      return buckets.map((bucket, index) => ({
+        bucket,
+        value: values[index] ?? null,
+      }));
+    }
+
+    if (Array.isArray(buckets)) {
+      return buckets as Array<Record<string, unknown>>;
+    }
+
+    if (Array.isArray(data)) {
+      return data as Array<Record<string, unknown>>;
+    }
+  }
+
+  return [];
+}
+
+function parseLatencyFromHistogramEntry(entry: Record<string, unknown>): number | null {
+  const candidates: Array<unknown> = [
+    entry.bucketStart,
+    entry.bucket_start,
+    entry.bucket,
+    entry.bucketEnd,
+    entry.bucket_end,
+    entry.latency,
+    entry.valueLatency,
+    entry.value_latency,
+    entry.value,
+    entry.avgLatency,
+    entry.avg_latency,
+  ];
+
+  for (const candidate of candidates) {
+    const parsed = parseHistogramNumber(candidate);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function parseHistogramNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === 'string') {
+    const matches = value.match(/-?\d+(\.\d+)?/);
+    if (!matches) {
+      return null;
+    }
+    const numeric = Number(matches[0]);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+
+  return null;
 }
 
 function computeHistoryStats(points: LatencyHistoryPoint[]): HistoryStats {
